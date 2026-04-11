@@ -1,0 +1,56 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.*
+.yarn/
+.pnpm-store/
+
+# Build output
+dist/
+dist-ssr/
+build/
+*.local
+
+# Rust / Tauri build
+src-tauri/target/
+src-tauri/gen/
+src-tauri/WixTools/
+
+# Editor / OS
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dev artifacts
+.screenshots/
+*.log
+.env
+.env.*
+!.env.example
+
+# TS build info
+*.tsbuildinfo
+
+# macOS packaging
+*.dmg
+*.pkg
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Claude Code runtime
+.claude/

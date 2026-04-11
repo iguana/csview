@@ -1,0 +1,74 @@
+csview — Proprietary Commercial License
+========================================
+
+Copyright (c) 2026 csview. All rights reserved.
+
+This software, including all source code, compiled binaries, documentation,
+graphical assets, and associated files distributed as "csview" (the
+"Software"), is the proprietary and confidential property of the copyright
+holder.
+
+1. SOURCE-AVAILABLE, NOT OPEN SOURCE
+   The source code is published for the purpose of transparency, security
+   review, and evaluation. Publication does NOT grant any license under
+   copyright, patent, trademark, or any other right.
+
+2. GRANT OF USE — PERSONAL, NON-COMMERCIAL EVALUATION ONLY
+   Subject to the terms of this license, the copyright holder grants you a
+   personal, non-transferable, non-exclusive, revocable right to:
+     (a) view and inspect the source code, and
+     (b) compile and run the Software on machines you personally own,
+         solely for the purpose of evaluating whether to purchase a
+         commercial license.
+
+3. PROHIBITED WITHOUT A SEPARATE WRITTEN COMMERCIAL LICENSE
+   Unless and until you have entered into a written commercial license
+   agreement with the copyright holder, you may NOT:
+     (a) use the Software in a commercial, production, for-profit, or
+         revenue-generating context;
+     (b) use the Software on behalf of, or for the benefit of, an employer,
+         client, contractor, customer, or any third party;
+     (c) distribute, republish, sublicense, sell, rent, lease, or
+         sublicense the Software or any derivative work thereof;
+     (d) incorporate the Software, in whole or in part, into any other
+         product or service (commercial or otherwise);
+     (e) offer the Software as a hosted, SaaS, or managed service;
+     (f) remove, alter, or obscure any copyright, trademark, or
+         proprietary notice contained in the Software;
+     (g) use the name "csview" or any associated trademarks for any
+         product, service, or promotion.
+
+4. MODIFICATIONS
+   You may make local modifications to the source code for personal
+   evaluation purposes only. Any such modification remains subject to this
+   license and may not be distributed under any circumstances without a
+   separate written agreement.
+
+5. COMMERCIAL LICENSING
+   Commercial use requires a paid license. To request a commercial license
+   — including for internal business use, deployment to employees or
+   customers, or redistribution as part of another product — please contact
+   the copyright holder.
+
+6. TERMINATION
+   This license terminates automatically and immediately upon any breach of
+   its terms. Upon termination you must cease all use of the Software and
+   destroy all copies in your possession.
+
+7. NO WARRANTY
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+   OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND
+   NONINFRINGEMENT. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR
+   ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+   CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION
+   WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+8. GOVERNING LAW
+   This license shall be governed by and construed in accordance with the
+   laws of the jurisdiction in which the copyright holder resides, without
+   regard to conflict-of-laws principles.
+
+By downloading, cloning, compiling, or otherwise obtaining a copy of the
+Software, you acknowledge that you have read, understood, and agree to be
+bound by this license.
