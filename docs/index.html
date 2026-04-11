@@ -1,0 +1,633 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>csview — a fast, clean CSV viewer &amp; editor for macOS</title>
+    <meta
+      name="description"
+      content="csview is a native macOS CSV viewer and editor with a virtualized grid, editing, sorting, search, multiple palettes, and file association. Download for Apple Silicon."
+    />
+    <meta property="og:title" content="csview" />
+    <meta
+      property="og:description"
+      content="A fast, clean CSV viewer &amp; editor for macOS"
+    />
+    <meta property="og:image" content="images/hero-parchment-dark.png" />
+    <meta property="og:type" content="website" />
+    <meta name="theme-color" content="#1e1c16" />
+    <link rel="icon" href="favicon-32.png" type="image/png" />
+    <style>
+      /* ---------- Palette (Parchment dark, matching the app) ---------- */
+      :root {
+        --bg: #1e1c16;
+        --bg-elevated: #272520;
+        --bg-soft: #23211a;
+        --border: #342f23;
+        --border-strong: #4a4535;
+        --text: #e9e1ce;
+        --text-muted: #a49980;
+        --text-dim: #6d6553;
+        --accent: #e0995b;
+        --accent-strong: #c97f3d;
+        --integer: #d4a659;
+        --float: #e09366;
+        --boolean: #b2c470;
+        --date: #7ab386;
+        --string: #8eb0d0;
+
+        color-scheme: dark;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family:
+          -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui,
+          sans-serif;
+        font-size: 16px;
+        line-height: 1.55;
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+      }
+      a {
+        color: var(--accent);
+        text-decoration: none;
+        border-bottom: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+        transition: border-color 120ms;
+      }
+      a:hover {
+        border-bottom-color: var(--accent);
+      }
+      code {
+        font-family:
+          "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Monaco, monospace;
+        font-size: 0.9em;
+        background: var(--bg-soft);
+        border: 1px solid var(--border);
+        padding: 1px 6px;
+        border-radius: 4px;
+        color: var(--text);
+      }
+      pre {
+        font-family:
+          "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Monaco, monospace;
+        font-size: 13px;
+        background: var(--bg-soft);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 14px 16px;
+        overflow-x: auto;
+        color: var(--text);
+        line-height: 1.55;
+      }
+      pre code {
+        background: none;
+        border: none;
+        padding: 0;
+      }
+      h1,
+      h2,
+      h3 {
+        color: var(--text);
+        letter-spacing: -0.02em;
+        margin: 0;
+      }
+
+      /* ---------- Layout ---------- */
+      .container {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 0 24px;
+      }
+
+      /* ---------- Hero ---------- */
+      .hero {
+        padding: 80px 0 60px;
+        background:
+          radial-gradient(
+            ellipse at 50% 0%,
+            color-mix(in srgb, var(--accent) 10%, transparent) 0%,
+            transparent 60%
+          ),
+          linear-gradient(180deg, var(--bg-elevated) 0%, var(--bg) 100%);
+        border-bottom: 1px solid var(--border);
+      }
+      .hero-inner {
+        text-align: center;
+      }
+      .hero-logo {
+        width: 96px;
+        height: 96px;
+        border-radius: 22px;
+        box-shadow:
+          0 24px 60px -16px rgba(0, 0, 0, 0.5),
+          0 0 0 1px var(--border);
+        margin-bottom: 28px;
+      }
+      .hero h1 {
+        font-size: 72px;
+        font-weight: 800;
+        letter-spacing: -0.03em;
+        background: linear-gradient(
+          180deg,
+          var(--text) 0%,
+          var(--accent) 100%
+        );
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        margin-bottom: 12px;
+      }
+      .hero .tagline {
+        font-size: 22px;
+        color: var(--text-muted);
+        margin: 0 0 36px;
+        font-weight: 400;
+      }
+      .download-row {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+        justify-content: center;
+      }
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 14px 24px;
+        border-radius: 10px;
+        font-weight: 600;
+        font-size: 15px;
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: var(--bg);
+        transition:
+          background 120ms,
+          transform 80ms,
+          box-shadow 120ms;
+        cursor: pointer;
+      }
+      .btn:hover {
+        background: var(--accent-strong);
+        border-color: var(--accent-strong);
+        transform: translateY(-1px);
+        box-shadow: 0 8px 24px -8px color-mix(in srgb, var(--accent) 60%, transparent);
+      }
+      .btn.ghost {
+        background: transparent;
+        color: var(--text);
+        border: 1px solid var(--border-strong);
+      }
+      .btn.ghost:hover {
+        background: var(--bg-soft);
+        border-color: var(--text-muted);
+        color: var(--text);
+      }
+      .btn .kb {
+        font-size: 11px;
+        opacity: 0.75;
+        font-weight: 500;
+      }
+      .download-note {
+        margin-top: 14px;
+        font-size: 13px;
+        color: var(--text-dim);
+      }
+      .download-note a {
+        color: var(--text-muted);
+      }
+
+      /* ---------- Hero screenshot ---------- */
+      .hero-screenshot {
+        margin-top: 56px;
+        padding: 0 24px;
+      }
+      .hero-screenshot img {
+        display: block;
+        width: 100%;
+        max-width: 1280px;
+        margin: 0 auto;
+        border-radius: 14px;
+        border: 1px solid var(--border);
+        box-shadow:
+          0 40px 120px -40px rgba(0, 0, 0, 0.7),
+          0 12px 32px -12px rgba(0, 0, 0, 0.4);
+      }
+
+      /* ---------- Section chrome ---------- */
+      section {
+        padding: 80px 0;
+        border-bottom: 1px solid var(--border);
+      }
+      section h2 {
+        font-size: 36px;
+        font-weight: 700;
+        margin-bottom: 12px;
+      }
+      section .section-lead {
+        font-size: 17px;
+        color: var(--text-muted);
+        margin: 0 0 48px;
+        max-width: 640px;
+      }
+      .kicker {
+        display: inline-block;
+        font-size: 11px;
+        letter-spacing: 1.2px;
+        text-transform: uppercase;
+        color: var(--accent);
+        font-weight: 700;
+        padding: 4px 10px;
+        border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+        border-radius: 999px;
+        margin-bottom: 16px;
+      }
+
+      /* ---------- Features ---------- */
+      .features {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+        gap: 20px;
+      }
+      .feature {
+        background: var(--bg-soft);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 22px 22px 20px;
+        transition: border-color 180ms, background 180ms;
+      }
+      .feature:hover {
+        border-color: var(--border-strong);
+        background: var(--bg-elevated);
+      }
+      .feature .icon {
+        width: 40px;
+        height: 40px;
+        border-radius: 10px;
+        background: color-mix(in srgb, var(--accent) 15%, transparent);
+        border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 18px;
+        color: var(--accent);
+        margin-bottom: 16px;
+      }
+      .feature h3 {
+        font-size: 16px;
+        font-weight: 700;
+        margin-bottom: 6px;
+      }
+      .feature p {
+        font-size: 14px;
+        color: var(--text-muted);
+        margin: 0;
+        line-height: 1.55;
+      }
+
+      /* ---------- Screenshot gallery ---------- */
+      .gallery {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 48px;
+      }
+      .gallery figure {
+        margin: 0;
+      }
+      .gallery img {
+        display: block;
+        width: 100%;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        box-shadow: 0 24px 60px -24px rgba(0, 0, 0, 0.55);
+      }
+      .gallery figcaption {
+        margin-top: 14px;
+        font-size: 13px;
+        color: var(--text-muted);
+        text-align: center;
+      }
+      .gallery figcaption strong {
+        color: var(--text);
+        font-weight: 600;
+      }
+
+      /* ---------- Install / CLI ---------- */
+      .install-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 28px;
+      }
+      @media (min-width: 820px) {
+        .install-grid {
+          grid-template-columns: 1fr 1fr;
+        }
+      }
+      .install-card {
+        background: var(--bg-soft);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 24px 24px 22px;
+      }
+      .install-card h3 {
+        font-size: 18px;
+        margin-bottom: 12px;
+      }
+      .install-card p {
+        color: var(--text-muted);
+        margin: 0 0 16px;
+        font-size: 14px;
+      }
+      .install-card pre {
+        margin: 0;
+      }
+
+      /* ---------- Footer ---------- */
+      footer {
+        padding: 48px 0 56px;
+        text-align: center;
+        color: var(--text-dim);
+        font-size: 13px;
+      }
+      footer p {
+        margin: 0 0 8px;
+      }
+      footer .license-note {
+        max-width: 620px;
+        margin: 14px auto 0;
+        padding: 14px 18px;
+        border: 1px dashed var(--border-strong);
+        border-radius: 8px;
+        color: var(--text-muted);
+        font-size: 12px;
+      }
+
+      @media (max-width: 720px) {
+        .hero {
+          padding: 56px 0 40px;
+        }
+        .hero h1 {
+          font-size: 52px;
+        }
+        .hero .tagline {
+          font-size: 18px;
+        }
+        section {
+          padding: 56px 0;
+        }
+        section h2 {
+          font-size: 28px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="hero">
+      <div class="container hero-inner">
+        <img
+          src="images/icon-256.png"
+          alt="csview icon"
+          class="hero-logo"
+          width="96"
+          height="96"
+        />
+        <h1>csview</h1>
+        <p class="tagline">A fast, clean CSV viewer &amp; editor for macOS.</p>
+        <div class="download-row">
+          <a
+            class="btn"
+            href="https://github.com/iguana/csview/releases/latest/download/csview_0.1.0_aarch64.dmg"
+          >
+            ↓ Download for macOS
+            <span class="kb">Apple Silicon · 6.8 MB</span>
+          </a>
+          <a class="btn ghost" href="https://github.com/iguana/csview">
+            ⭐ View on GitHub
+          </a>
+        </div>
+        <p class="download-note">
+          Version 0.1.0 ·
+          <a href="https://github.com/iguana/csview/releases"
+            >all releases</a
+          >
+          · Apple Silicon only —
+          <a href="#install">build from source</a> for Intel
+        </p>
+      </div>
+      <div class="hero-screenshot">
+        <div class="container">
+          <img
+            src="images/hero-parchment-dark.png"
+            alt="csview showing the employees.csv sample in parchment dark theme with a sorted salary column, Engineer search highlighting, and a selected row with full field details"
+            loading="eager"
+          />
+        </div>
+      </div>
+    </header>
+
+    <section id="features">
+      <div class="container">
+        <span class="kicker">Features</span>
+        <h2>Everything a CSV deserves.</h2>
+        <p class="section-lead">
+          csview opens files instantly — even million-row ones — and lets you
+          read, sort, search, edit, and save without ever hanging on a spinner.
+        </p>
+        <div class="features">
+          <div class="feature">
+            <div class="icon">⚡</div>
+            <h3>Virtualized grid</h3>
+            <p>
+              Only the visible rows are rendered. Large files stream from disk
+              with paged reads so the UI never blocks.
+            </p>
+          </div>
+          <div class="feature">
+            <div class="icon">✎</div>
+            <h3>Full editing</h3>
+            <p>
+              Click or press <code>F2</code> to edit cells inline. Insert and
+              delete rows. Cut, copy, paste a whole range from Excel or Numbers.
+            </p>
+          </div>
+          <div class="feature">
+            <div class="icon">↶</div>
+            <h3>Undo everything</h3>
+            <p>
+              Every edit, paste, insert, and delete goes on a 500-step history
+              stack. <code>⌘Z</code> and <code>⇧⌘Z</code> work as you'd expect.
+            </p>
+          </div>
+          <div class="feature">
+            <div class="icon">↕</div>
+            <h3>Multi-column sort</h3>
+            <p>
+              Click a header to sort, shift-click to stack a second key. Type
+              inference picks numeric vs. string comparison automatically.
+            </p>
+          </div>
+          <div class="feature">
+            <div class="icon">⌕</div>
+            <h3>Instant search</h3>
+            <p>
+              Live substring search across every cell with hit highlighting and
+              row jumping. Debounced so big files stay responsive.
+            </p>
+          </div>
+          <div class="feature">
+            <div class="icon">∑</div>
+            <h3>Column statistics</h3>
+            <p>
+              Click any column header for count, unique, min, max, mean, sum,
+              and a top-values bar chart — all computed on-demand.
+            </p>
+          </div>
+          <div class="feature">
+            <div class="icon">◐</div>
+            <h3>Six palettes</h3>
+            <p>
+              Parchment, Noir, Solarized, Ocean, Forest, Graphite — each with
+              light and dark variants. Follows your system preference or pin it.
+            </p>
+          </div>
+          <div class="feature">
+            <div class="icon">⊞</div>
+            <h3>Multiple windows</h3>
+            <p>
+              Open one file per window. <code>⌘N</code> for a blank window,
+              <code>⌘O</code> to open a new file alongside your current one.
+            </p>
+          </div>
+          <div class="feature">
+            <div class="icon">⎇</div>
+            <h3>Native menu bar</h3>
+            <p>
+              File, Edit, View, Window — real macOS menus with real keyboard
+              accelerators. Finder double-click opens files directly.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="screenshots">
+      <div class="container">
+        <span class="kicker">Screenshots</span>
+        <h2>Colorful, low-contrast, distraction-free.</h2>
+        <p class="section-lead">
+          Every palette is tuned for long reading sessions. No neon, no
+          gradient soup, no harsh pure-white or pitch-black — just warm,
+          editorial tones that let the data speak.
+        </p>
+        <div class="gallery">
+          <figure>
+            <img
+              src="images/screenshot-noir-fullwidth.png"
+              alt="csview in noir dark palette with the sidebar collapsed, showing all 8 columns of employees.csv sorted by salary descending, with Engineer search matches highlighted in amber"
+              loading="lazy"
+            />
+            <figcaption>
+              <strong>Noir</strong> · sidebar collapsed for a full-width view,
+              sorted by salary, 45 search matches highlighted
+            </figcaption>
+          </figure>
+          <figure>
+            <img
+              src="images/screenshot-ocean-light.png"
+              alt="csview in ocean light palette with the row panel open showing full field details for a selected row"
+              loading="lazy"
+            />
+            <figcaption>
+              <strong>Ocean · Light</strong> · row panel showing every field of
+              the active row as a labeled card
+            </figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <section id="install">
+      <div class="container">
+        <span class="kicker">Install</span>
+        <h2>Two minutes to set up.</h2>
+        <p class="section-lead">
+          Download the disk image and drag <strong>csview.app</strong> into
+          Applications. Optionally symlink the binary so you can open files
+          straight from the terminal.
+        </p>
+        <div class="install-grid">
+          <div class="install-card">
+            <h3>1. Download &amp; install</h3>
+            <p>
+              Grab the DMG for Apple Silicon and drop the app into
+              <code>~/Applications</code>. Because it isn't notarized, the
+              first launch needs a right-click <strong>→ Open</strong>.
+            </p>
+            <pre><code>open ~/Downloads/csview_0.1.0_aarch64.dmg</code></pre>
+          </div>
+          <div class="install-card">
+            <h3>2. Command line</h3>
+            <p>
+              Symlink the binary into <code>$PATH</code> and open any CSV with a
+              single command.
+            </p>
+            <pre><code>sudo ln -s \
+  /Applications/csview.app/Contents/MacOS/csview \
+  /usr/local/bin/csview
+
+csview ~/data/employees.csv</code></pre>
+          </div>
+          <div class="install-card">
+            <h3>3. File association</h3>
+            <p>
+              Right-click any <code>.csv</code> in Finder, choose <strong>Get
+              Info → Open with</strong>, pick <strong>csview</strong>, then
+              <strong>Change All…</strong> to make it the default handler.
+            </p>
+          </div>
+          <div class="install-card">
+            <h3>4. Build from source</h3>
+            <p>
+              For Intel Macs or tinkering, clone the repo and run the Tauri
+              build for your target.
+            </p>
+            <pre><code>git clone https://github.com/iguana/csview
+cd csview
+pnpm install
+pnpm tauri build</code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      <div class="container">
+        <p>
+          <a href="https://github.com/iguana/csview">github.com/iguana/csview</a>
+          ·
+          <a href="https://github.com/iguana/csview/releases/latest"
+            >latest release</a
+          >
+          ·
+          <a href="https://github.com/iguana/csview/blob/main/LICENSE"
+            >license</a
+          >
+        </p>
+        <p class="license-note">
+          csview is source-available but <strong>not free for commercial use</strong>.
+          Personal evaluation is permitted; any production, internal business,
+          or for-profit use requires a separate written commercial license.
+          See the <a href="https://github.com/iguana/csview/blob/main/LICENSE">LICENSE</a> for details.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>
