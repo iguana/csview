@@ -1,5 +1,13 @@
 # Things needed from the human
 
+## Integration polish needed (no human input required)
+
+The csviewai app launches and renders the full chrome (titlebar, toolbar, grid headers, AI menu bar with all 11 feature items). Two integration issues remain from the frontend expecting csview's API shape:
+- Grid data cells don't render because `RangeCache` calls `readRange(fileId, start, end)` but csviewai's API uses `readRange(fileId, offset, limit, orderBy)`. Fix: update the AI `App.tsx` to construct the cache with the correct fetcher signature.
+- "sort_csv not found" error because the shared DataGrid tries to call the csview sort command. Fix: add a `sort_csv` command to csviewai that wraps `SqliteStore::read_range` with an ORDER BY clause.
+
+These are straightforward adapter-layer fixes, not missing features.
+
 ## Before testing AI features end-to-end
 
 1. **Anthropic API key** — The app prompts users for their API key in the Account panel at runtime. For development/testing of the LLM integration, I need either:
