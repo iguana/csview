@@ -1,0 +1,64 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "csviewai",
+  "version": "0.1.0",
+  "identifier": "dev.csview.ai",
+  "build": {
+    "beforeDevCommand": "pnpm ai:dev",
+    "devUrl": "http://localhost:1523",
+    "beforeBuildCommand": "pnpm ai:build",
+    "frontendDist": "../dist-ai"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "csviewai",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 640,
+        "minHeight": 400,
+        "resizable": true,
+        "fullscreen": false,
+        "titleBarStyle": "Transparent",
+        "hiddenTitle": true
+      }
+    ],
+    "security": {
+      "csp": null
+    },
+    "macOSPrivateApi": true
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png",
+      "icons/icon.icns"
+    ],
+    "fileAssociations": [
+      {
+        "ext": ["csv", "tsv"],
+        "name": "CSV Document",
+        "description": "Comma-separated values file",
+        "role": "Viewer",
+        "rank": "Default"
+      }
+    ]
+  },
+  "plugins": {
+    "cli": {
+      "description": "View and analyse CSV files with AI",
+      "args": [
+        {
+          "name": "file",
+          "index": 1,
+          "takesValue": true,
+          "description": "CSV file to open"
+        }
+      ]
+    }
+  }
+}

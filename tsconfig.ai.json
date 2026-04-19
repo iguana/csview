@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@shared/*": ["./src/*"],
+      "@ai/*": ["./src-ai/*"]
+    }
+  },
+  "include": ["src", "src-ai", "vite.config.ai.ts"]
+}

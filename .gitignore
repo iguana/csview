@@ -12,9 +12,12 @@ build/
 *.local
 
 # Rust / Tauri build
+target/
 src-tauri/target/
 src-tauri/gen/
 src-tauri/WixTools/
+src-tauri-ai/target/
+src-tauri-ai/gen/
 
 # Editor / OS
 .DS_Store
@@ -47,6 +50,10 @@ lerna-debug.log*
 # macOS packaging
 *.dmg
 *.pkg
+
+# AI build output
+dist-ai/
+*.tsbuildinfo
 
 # Coverage
 coverage/

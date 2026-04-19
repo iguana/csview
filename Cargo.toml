@@ -1,0 +1,3 @@
+[workspace]
+members = ["csview-engine", "src-tauri", "src-tauri-ai"]
+resolver = "2"

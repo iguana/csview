@@ -10,7 +10,10 @@
     "tauri": "tauri",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc -b --noEmit"
+    "typecheck": "tsc -b --noEmit",
+    "ai:dev": "vite --config vite.config.ai.ts",
+    "ai:build": "tsc -b tsconfig.ai.json && vite build --config vite.config.ai.ts",
+    "ai:test": "vitest run --config vite.config.ai.ts"
   },
   "dependencies": {
     "@tanstack/react-table": "^8.20.5",
