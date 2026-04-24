@@ -4,6 +4,7 @@
 // have direct equivalents). The colour palette is pulled from the app's
 // CSS custom properties so charts pick up whatever theme the user picked.
 
+import { useEffect, useMemo, useState } from "react";
 import {
   Area,
   AreaChart,
@@ -30,27 +31,80 @@ interface ChartViewProps {
   data: ChartData;
 }
 
-/// Modern, palette-tied colour ramp. Re-uses the CSS variables the rest of
-/// the app sets so charts auto-restyle when the user picks a new palette.
-const COLOR_VARS = [
-  "var(--accent)",
-  "var(--kind-string)",
-  "var(--kind-integer)",
-  "var(--success)",
-  "var(--kind-date)",
-  "var(--kind-float)",
-  "var(--warning)",
-  "var(--kind-boolean)",
-  "var(--accent-strong)",
-  "var(--text-muted)",
+// Palette is keyed off the app's CSS custom properties so charts adopt the
+// active theme. SVG `fill` attributes only resolve `var(...)` reliably in
+// some recharts subcomponents (Bar fills work; Cell fills inside Pie /
+// Treemap do not). To keep every chart kind consistent, we resolve the
+// CSS-variable references to actual computed colour strings on mount —
+// see `useResolvedPalette` below.
+const COLOR_VAR_NAMES = [
+  "--accent",
+  "--kind-string",
+  "--kind-integer",
+  "--success",
+  "--kind-date",
+  "--kind-float",
+  "--warning",
+  "--kind-boolean",
+  "--accent-strong",
+  "--text-muted",
+] as const;
+
+// Fallback hex ramp used when getComputedStyle can't read the variables
+// (jsdom in tests, or running before the theme palette has been applied).
+const FALLBACK_RAMP = [
+  "#e0995b",
+  "#8eb0d0",
+  "#d4a659",
+  "#a7c07b",
+  "#7ab386",
+  "#e09366",
+  "#e6b457",
+  "#b2c470",
+  "#c97f3d",
+  "#a49980",
 ];
-const colorAt = (i: number) => COLOR_VARS[i % COLOR_VARS.length];
+
+function useResolvedPalette(): string[] {
+  const [palette, setPalette] = useState<string[]>(FALLBACK_RAMP);
+  useEffect(() => {
+    const root = document.documentElement;
+    const cs = window.getComputedStyle(root);
+    const resolved = COLOR_VAR_NAMES.map((name, i) => {
+      const v = cs.getPropertyValue(name).trim();
+      return v || FALLBACK_RAMP[i];
+    });
+    setPalette(resolved);
+    // Re-resolve when the palette / theme attribute changes — the rest of
+    // the app sets `data-theme` and inline-CSS-vars via applyPalette().
+    const observer = new MutationObserver(() => {
+      const cs2 = window.getComputedStyle(root);
+      setPalette(
+        COLOR_VAR_NAMES.map((name, i) => {
+          const v = cs2.getPropertyValue(name).trim();
+          return v || FALLBACK_RAMP[i];
+        }),
+      );
+    });
+    observer.observe(root, {
+      attributes: true,
+      attributeFilter: ["style", "data-theme"],
+    });
+    return () => observer.disconnect();
+  }, []);
+  return palette;
+}
 
 const BASE_HEIGHT = 280;
 
 export function ChartView({ data }: ChartViewProps) {
   const { spec, rows, series, xLabel, yLabel } = data;
   const kind = spec.chartType;
+  const palette = useResolvedPalette();
+  const colorAt = useMemo(
+    () => (i: number) => palette[i % palette.length],
+    [palette],
+  );
 
   // Common axis / grid / tooltip styling.
   const axisStyle = {
@@ -227,15 +281,52 @@ export function ChartView({ data }: ChartViewProps) {
       name: String(r.x ?? ""),
       size: Number(r.y ?? 0),
     }));
+    // Closure captures the resolved palette so each cell gets a real
+    // colour (CSS-variable strings won't render in SVG fill attrs here).
+    const TreemapCell = (props: unknown) => {
+      const p = props as {
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+        index: number;
+        name: string;
+      };
+      if (p.width < 0 || p.height < 0) return null;
+      return (
+        <g>
+          <rect
+            x={p.x}
+            y={p.y}
+            width={p.width}
+            height={p.height}
+            style={{
+              fill: colorAt(p.index ?? 0),
+              stroke: "var(--bg-elevated)",
+              strokeWidth: 2,
+            }}
+          />
+          {p.width > 60 && p.height > 24 ? (
+            <text
+              x={p.x + 6}
+              y={p.y + 16}
+              fill="var(--badge-text)"
+              fontSize={11}
+              fontWeight={600}
+            >
+              {p.name}
+            </text>
+          ) : null}
+        </g>
+      );
+    };
     chartNode = (
       <Treemap
         data={treemapData}
         dataKey="size"
         stroke="var(--bg-elevated)"
         fill={colorAt(0)}
-        content={
-          <CustomTreemapCell />
-        }
+        content={<TreemapCell />}
       />
     );
   } else {
@@ -272,43 +363,3 @@ export function ChartView({ data }: ChartViewProps) {
 }
 
 
-// Treemap rectangles need a custom renderer to get the colour ramp + label.
-function CustomTreemapCell(props: unknown) {
-  // Recharts passes a lot of geometry props; type loosely.
-  const p = props as {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-    index: number;
-    name: string;
-    size: number;
-  };
-  if (p.width < 0 || p.height < 0) return null;
-  return (
-    <g>
-      <rect
-        x={p.x}
-        y={p.y}
-        width={p.width}
-        height={p.height}
-        style={{
-          fill: colorAt(p.index ?? 0),
-          stroke: "var(--bg-elevated)",
-          strokeWidth: 2,
-        }}
-      />
-      {p.width > 60 && p.height > 24 ? (
-        <text
-          x={p.x + 6}
-          y={p.y + 16}
-          fill="var(--badge-text)"
-          fontSize={11}
-          fontWeight={600}
-        >
-          {p.name}
-        </text>
-      ) : null}
-    </g>
-  );
-}
