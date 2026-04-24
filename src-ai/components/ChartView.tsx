@@ -127,7 +127,12 @@ export function ChartView({ data }: ChartViewProps) {
   if (kind === "bar" || kind === "horizontal_bar") {
     const horizontal = kind === "horizontal_bar";
     chartNode = (
-      <BarChart data={rows} layout={horizontal ? "vertical" : "horizontal"}>
+      <BarChart
+        data={rows}
+        layout={horizontal ? "vertical" : "horizontal"}
+
+
+      >
         <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
         {horizontal ? (
           <>
@@ -141,7 +146,7 @@ export function ChartView({ data }: ChartViewProps) {
           </>
         )}
         <Tooltip {...tooltipStyle} />
-        <Bar dataKey="y" fill={colorAt(0)} radius={[6, 6, 0, 0]} />
+        <Bar isAnimationActive={false} dataKey="y" fill={colorAt(0)} radius={[6, 6, 0, 0]} />
       </BarChart>
     );
   } else if (kind === "stacked_bar" || kind === "grouped_bar") {
@@ -156,6 +161,7 @@ export function ChartView({ data }: ChartViewProps) {
         {series.map((s, i) => (
           <Bar
             key={s}
+            isAnimationActive={false}
             dataKey={s}
             stackId={stacked ? "a" : undefined}
             fill={colorAt(i)}
@@ -178,6 +184,7 @@ export function ChartView({ data }: ChartViewProps) {
           series.map((s, i) => (
             <Line
               key={s}
+              isAnimationActive={false}
               type="monotone"
               dataKey={s}
               stroke={colorAt(i)}
@@ -188,6 +195,7 @@ export function ChartView({ data }: ChartViewProps) {
           ))
         ) : (
           <Line
+            isAnimationActive={false}
             type="monotone"
             dataKey="y"
             stroke={colorAt(0)}
@@ -211,6 +219,7 @@ export function ChartView({ data }: ChartViewProps) {
             {series.map((s, i) => (
               <Area
                 key={s}
+                isAnimationActive={false}
                 type="monotone"
                 dataKey={s}
                 stroke={colorAt(i)}
@@ -222,6 +231,7 @@ export function ChartView({ data }: ChartViewProps) {
           </>
         ) : (
           <Area
+            isAnimationActive={false}
             type="monotone"
             dataKey="y"
             stroke={colorAt(0)}
@@ -236,6 +246,7 @@ export function ChartView({ data }: ChartViewProps) {
     chartNode = (
       <PieChart>
         <Pie
+          isAnimationActive={false}
           data={rows}
           dataKey="y"
           nameKey="x"
@@ -262,7 +273,7 @@ export function ChartView({ data }: ChartViewProps) {
         <XAxis dataKey="x" type="number" {...axisStyle} />
         <YAxis dataKey="y" type="number" {...axisStyle} />
         <Tooltip {...tooltipStyle} />
-        <Scatter data={rows} fill={colorAt(0)} />
+        <Scatter isAnimationActive={false} data={rows} fill={colorAt(0)} />
       </ScatterChart>
     );
   } else if (kind === "histogram") {
@@ -272,7 +283,7 @@ export function ChartView({ data }: ChartViewProps) {
         <XAxis dataKey="x" {...axisStyle} interval={0} angle={-25} textAnchor="end" height={60} />
         <YAxis {...axisStyle} />
         <Tooltip {...tooltipStyle} />
-        <Bar dataKey="y" fill={colorAt(0)} radius={[4, 4, 0, 0]} />
+        <Bar isAnimationActive={false} dataKey="y" fill={colorAt(0)} radius={[4, 4, 0, 0]} />
       </BarChart>
     );
   } else if (kind === "treemap") {
@@ -324,6 +335,8 @@ export function ChartView({ data }: ChartViewProps) {
       <Treemap
         data={treemapData}
         dataKey="size"
+
+
         stroke="var(--bg-elevated)"
         fill={colorAt(0)}
         content={<TreemapCell />}
@@ -349,7 +362,10 @@ export function ChartView({ data }: ChartViewProps) {
           )}
         </div>
       </div>
-      <div className="chart-body" style={{ height: BASE_HEIGHT }}>
+      <div
+        className="chart-body"
+        style={{ height: BASE_HEIGHT, width: "100%" }}
+      >
         <ResponsiveContainer width="100%" height="100%">
           {chartNode as React.ReactElement}
         </ResponsiveContainer>

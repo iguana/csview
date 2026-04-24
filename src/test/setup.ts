@@ -35,6 +35,46 @@ if (typeof window.matchMedia === "undefined") {
   });
 }
 
+// Polyfill layout so recharts' ResponsiveContainer thinks it has space.
+// jsdom returns 0×0 for everything, which makes recharts skip rendering
+// the entire chart. Lying here lets ChartView tests verify SVG output.
+if (typeof Element !== "undefined") {
+  const originalGetBCR = Element.prototype.getBoundingClientRect;
+  Element.prototype.getBoundingClientRect = function () {
+    const rect = originalGetBCR.call(this);
+    if (rect.width === 0 && rect.height === 0) {
+      return {
+        x: 0,
+        y: 0,
+        top: 0,
+        left: 0,
+        right: 600,
+        bottom: 300,
+        width: 600,
+        height: 300,
+        toJSON: () => ({}),
+      } as DOMRect;
+    }
+    return rect;
+  };
+  Object.defineProperty(HTMLElement.prototype, "offsetWidth", {
+    configurable: true,
+    get: () => 600,
+  });
+  Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+    configurable: true,
+    get: () => 300,
+  });
+  Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+    configurable: true,
+    get: () => 600,
+  });
+  Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+    configurable: true,
+    get: () => 300,
+  });
+}
+
 // Stub the Tauri invoke system so components can render in jsdom.
 // Tests that need behavior can override `window.__TAURI_INVOKE__`.
 (globalThis as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {
