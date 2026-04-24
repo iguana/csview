@@ -62,6 +62,7 @@ impl From<std::io::Error> for CommandError {
 /// Returned by `open_csv` and `execute_join` to give the frontend everything
 /// it needs to display the file immediately.
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileInfo {
     /// UUID v4 handle used in all subsequent commands for this file.
     pub file_id: String,

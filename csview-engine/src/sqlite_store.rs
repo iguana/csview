@@ -35,6 +35,7 @@ use crate::engine::{ColumnKind, ColumnMeta};
 
 /// The result of executing a SELECT query.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct QueryResult {
     /// Column names from the result set.
     pub columns: Vec<String>,
@@ -48,6 +49,7 @@ pub struct QueryResult {
 
 /// Schema information intended for LLM prompt construction.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SchemaContext {
     pub table_name: String,
     pub columns: Vec<SchemaColumn>,
@@ -58,6 +60,7 @@ pub struct SchemaContext {
 
 /// Per-column schema information.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SchemaColumn {
     pub index: usize,
     /// Sanitised name used as the SQLite column identifier.

@@ -32,6 +32,7 @@ impl std::fmt::Display for Provider {
 
 /// A model available for selection in the UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
     pub id: String,
     pub name: String,

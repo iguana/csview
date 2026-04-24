@@ -12,7 +12,7 @@
     "test:watch": "vitest",
     "typecheck": "tsc -b --noEmit",
     "ai:dev": "vite --config vite.config.ai.ts",
-    "ai:build": "tsc -b tsconfig.ai.json && vite build --config vite.config.ai.ts",
+    "ai:build": "tsc -b tsconfig.ai.json && vite build --config vite.config.ai.ts && cp dist-ai/index-ai.html dist-ai/index.html",
     "ai:test": "vitest run --config vite.config.ai.ts"
   },
   "dependencies": {
