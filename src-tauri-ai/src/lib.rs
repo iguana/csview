@@ -99,7 +99,8 @@ pub fn run() {
             db::migrations::run_migrations(&conn)
                 .expect("could not run database migrations");
 
-            // Load .env file if present (for dev convenience).
+            // Load .env file if present (dev-only convenience). In a packaged
+            // .app the CWD is usually `/` so this just no-ops.
             if let Ok(contents) = std::fs::read_to_string(".env") {
                 for line in contents.lines() {
                     let line = line.trim();
@@ -110,31 +111,12 @@ pub fn run() {
                 }
             }
 
-            // Restore saved API key from DB, or auto-detect from env vars.
-            let stored: Option<(String, String)> = conn
-                .query_row(
-                    "SELECT api_key, model FROM account ORDER BY id DESC LIMIT 1",
-                    [],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-                )
-                .ok();
-
             let state = AiAppState::new(conn);
 
-            if let Some((compound_key, model)) = stored {
-                // compound_key = "provider:actual_key"
-                if let Some((prov_str, actual_key)) = compound_key.split_once(':') {
-                    let provider = match prov_str {
-                        "openai" => crate::llm::client::Provider::OpenAI,
-                        "google" => crate::llm::client::Provider::Google,
-                        _ => crate::llm::client::Provider::Anthropic,
-                    };
-                    *state.llm.lock() = Some(crate::llm::LlmClient::new(provider, actual_key.to_string(), model));
-                }
-            } else {
-                // No saved key — try env vars
-                crate::commands_ai::auto_detect_keys(&state);
-            }
+            // Single source of truth for picking the LLM client at startup —
+            // loads the saved account row (validating non-empty model) and
+            // falls back to env vars. See `commands_ai::auto_detect_keys`.
+            crate::commands_ai::auto_detect_keys(&state);
 
             app.manage(state);
 
