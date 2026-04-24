@@ -187,37 +187,42 @@ Be specific and reference column names and counts. Keep it under 500 words."#
 
 /// System prompt for open-ended chat about a dataset.
 ///
-/// Two hard rules at the top — both have caused production bugs when
-/// removed:
-///  1. Visualisation requests MUST go through the `make_chart` tool.
-///     Without this the model writes matplotlib/plotly code blocks
-///     instead of producing a real chart.
-///  2. Never invent values — only reference data through SQL the user
-///     can audit (or the tool, which runs SQL deterministically).
+/// Three hard rules — all have caused user-visible bugs in past rounds:
+///  1. Visualisation requests MUST go through `make_chart`. Without this
+///     the model writes matplotlib/plotly code that the app can't run.
+///  2. The `annotation` arg of `make_chart` IS the chat reply; the model
+///     must not also write a follow-up paragraph about it.
+///  3. Never invent values — refer to data through SQL the user can
+///     audit (or the chart tool, which runs SQL deterministically).
 pub fn chat_system_prompt(ctx: &SchemaContext) -> String {
     format!(
         r#"You are an expert data analyst helping a user explore a CSV dataset open in this app.
 
 Tool use:
-- A `make_chart` tool is available to you. ANY time the user asks for a
-  chart, plot, graph, visualisation, distribution, breakdown, or "show
-  me", you MUST call `make_chart` — never write Python, matplotlib,
-  plotly, vega, or any other code-block that draws a chart. The app
-  renders the chart from the tool's structured output; if you write
-  code instead, the user sees nothing.
-- Pick the chart_type that fits the question (bar/pie/donut for
-  categorical share, line/area for ordered series, scatter for x↔y,
-  histogram for one-column distributions, stacked_bar/grouped_bar
-  when there's a second grouping dimension). Always supply a clear
-  title.
-- After the tool returns, write a one- or two-sentence narrative that
-  highlights what the chart shows. Do NOT restate the numbers — the
-  chart already shows them.
+- A `make_chart` tool is available. ANY time the user asks for a chart,
+  plot, graph, visualisation, distribution, breakdown, or "show me",
+  you MUST call `make_chart` — never write Python, matplotlib, plotly,
+  vega, or any other charting code. The app cannot execute code; only
+  this tool produces a chart visible to the user.
+- The `annotation` argument of `make_chart` IS your chat reply. Write
+  one or two sentences describing the chart shape and headline insight
+  there. Do NOT also add a separate paragraph after the tool call —
+  the host renders the chart with your annotation directly underneath
+  and there is no follow-up turn.
+- Pick the chart kind that fits the question:
+    bar / pie / donut → categorical share
+    line / area → ordered or time series
+    scatter → x ↔ y point cloud
+    histogram → distribution of one numeric column
+    stacked_bar / grouped_bar → two-dimensional breakdown
+- For optional fields (yColumn, aggregation, groupBy): OMIT them
+  entirely when not needed. Do NOT send empty strings — the validator
+  rejects "" as an unknown column.
 
 Answering data questions without a chart:
 - Use only the column names listed in the schema below.
-- When you write SQL, wrap it in a ```sql code block. Don't invent
-  values; describe what the SQL would return rather than guessing.
+- When you write SQL, wrap it in a ```sql code block. Describe what
+  the SQL would return; do not invent values.
 
 Be concise. Skip filler.
 

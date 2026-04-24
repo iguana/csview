@@ -780,125 +780,64 @@ pub async fn chat_message(
     let tools = vec![chart_tool_definition()];
     let system = prompts::chat_system_prompt(&schema);
 
-    // Tool-use loop. Each round either completes with text (return to user)
-    // or emits a tool call we execute locally and feed back. Cap rounds to
-    // prevent runaway costs if the model gets stuck.
+    // Sub-agent design: a single LLM call. Either the model returns text
+    // (a normal chat reply) or it calls make_chart with the annotation
+    // baked into the tool args. We render the chart with the model's
+    // own annotation as the message body — NO narrative round-trip.
     //
-    // Token budget needs to be generous: reasoning models (gpt-5.x, o-series)
-    // burn tokens on hidden reasoning before producing any visible text,
-    // and 2048 was tight enough that chats sometimes exhausted budget mid
-    // narrative.
-    const TOOL_LOOP_TOKENS: u32 = 4096;
-    const FINAL_NARRATIVE_TOKENS: u32 = 2048;
-    const MAX_ROUNDS: usize = 5;
+    // This intentionally drops the previous tool-use loop. The looping
+    // wasn't buying us anything: the only legitimate use was "model
+    // calls tool, then writes a narrative", but the annotation field
+    // on ChartSpec replaces that. Looping just gave the model a way to
+    // get stuck retrying with bad args.
+    const CHART_TOKENS: u32 = 4096;
+
+    let reply = llm
+        .chat_with_tools(&system, &events, &tools, CHART_TOKENS)
+        .await
+        .map_err(llm_error_to_command_error)?;
 
     let mut charts: Vec<ChartData> = Vec::new();
-    let mut final_text = String::new();
-    let mut hit_cap = false;
-    for round in 0..MAX_ROUNDS {
-        let reply = llm
-            .chat_with_tools(&system, &events, &tools, TOOL_LOOP_TOKENS)
-            .await
-            .map_err(llm_error_to_command_error)?;
-        match reply {
-            ToolReply::Text(text) => {
-                final_text = text;
-                break;
-            }
-            ToolReply::ToolCall { call_id, name, arguments } => {
-                if name != "make_chart" {
-                    final_text = format!("(model requested unknown tool `{name}`)");
-                    break;
-                }
-                let spec: ChartSpec = serde_json::from_value(arguments.clone())
-                    .map_err(|e| CommandError::InvalidArg(format!("bad chart spec: {e}")))?;
-                eprintln!(
-                    "[chat] round {round}: tool call make_chart \
-                     kind={:?} x={} y={:?} agg={:?}",
-                    spec.chart_type, spec.x_column, spec.y_column, spec.aggregation
-                );
-                events.push(ToolEvent::AssistantToolCall {
-                    call_id: call_id.clone(),
-                    name: name.clone(),
-                    arguments,
-                });
-                // Execute the tool locally — no LLM-generated values reach
-                // the rendered chart, only the choice of columns and shape.
-                let tool_output = match run_make_chart(&state, &file_id, spec) {
-                    Ok(data) => {
-                        eprintln!(
-                            "[chat] round {round}: chart rendered ({} rows)",
-                            data.rows.len()
-                        );
-                        let summary = chart_summary_for_llm(&data);
-                        charts.push(data);
-                        summary
-                    }
-                    Err(e) => {
-                        eprintln!("[chat] round {round}: chart error: {e}");
-                        format!("{{\"error\": {:?}}}", e.to_string())
-                    }
-                };
-                events.push(ToolEvent::ToolResult {
-                    call_id,
-                    output: tool_output,
-                });
-                if round + 1 == MAX_ROUNDS {
-                    hit_cap = true;
-                }
-            }
+    let final_text: String;
+    match reply {
+        ToolReply::Text(text) => {
+            final_text = text;
         }
-    }
-
-    // If we exited the loop with charts in hand but no narrative text,
-    // do one final tools-disabled call to force the model to actually
-    // describe what it just rendered. The cap prompt explicitly says
-    // "no more tools" so the model can't bounce off into another round.
-    if final_text.is_empty() && !charts.is_empty() {
-        eprintln!(
-            "[chat] forcing narrative-only call after {} chart(s){}",
-            charts.len(),
-            if hit_cap { " (hit iteration cap)" } else { "" }
-        );
-        let narrative_events = events.clone();
-        match llm
-            .chat_with_tools(
-                &format!(
-                    "{system}\n\n\
-                     The chart(s) the user requested have already been \
-                     rendered for them via the make_chart tool. Do NOT \
-                     call any more tools. Reply with a brief one or two \
-                     sentence interpretation of what the chart(s) show.",
-                ),
-                &narrative_events,
-                &[],
-                FINAL_NARRATIVE_TOKENS,
-            )
-            .await
-        {
-            Ok(ToolReply::Text(t)) => final_text = t,
-            Ok(ToolReply::ToolCall { name, .. }) => {
-                eprintln!(
-                    "[chat] narrative-only call returned a tool call ({name}); ignoring"
-                );
-                final_text = format!(
-                    "Rendered {} chart{}.",
-                    charts.len(),
-                    if charts.len() == 1 { "" } else { "s" }
-                );
+        ToolReply::ToolCall { call_id: _, name, arguments } => {
+            if name != "make_chart" {
+                return Err(CommandError::InvalidArg(format!(
+                    "model requested unknown tool `{name}`"
+                )));
             }
-            Err(e) => {
-                eprintln!("[chat] narrative-only call failed: {e}");
-                final_text = format!(
-                    "Rendered {} chart{}.",
-                    charts.len(),
-                    if charts.len() == 1 { "" } else { "s" }
-                );
-            }
+            let spec: ChartSpec =
+                serde_json::from_value(arguments.clone()).map_err(|e| {
+                    CommandError::InvalidArg(format!("bad chart spec: {e}\nargs: {arguments}"))
+                })?;
+            eprintln!(
+                "[chat] tool call make_chart kind={:?} x={} y={:?} agg={:?} annotation_len={}",
+                spec.chart_type,
+                spec.x_column,
+                spec.y_column,
+                spec.aggregation,
+                spec.annotation.len()
+            );
+            // The annotation the model wrote in the tool args becomes the
+            // chat reply body. Falls back to the chart title if the model
+            // forgot to annotate (it shouldn't — the tool description says
+            // it's required — but defence in depth).
+            let annotation = if spec.annotation.trim().is_empty() {
+                spec.title.clone()
+            } else {
+                spec.annotation.clone()
+            };
+            let chart = run_make_chart(&state, &file_id, spec).map_err(|e| {
+                eprintln!("[chat] chart error: {e}");
+                e
+            })?;
+            eprintln!("[chat] chart rendered ({} rows)", chart.rows.len());
+            charts.push(chart);
+            final_text = annotation;
         }
-    }
-    if final_text.is_empty() {
-        final_text = "(no response)".into();
     }
 
     // Persist both turns.
@@ -959,23 +898,16 @@ fn run_make_chart(
     })
 }
 
-/// Compact JSON summary the LLM sees. The full payload (including data
-/// rows) is shipped to the frontend separately — feeding all rows back
-/// through the LLM would burn tokens and tempt hallucination.
-fn chart_summary_for_llm(data: &ChartData) -> String {
-    serde_json::json!({
-        "rendered": true,
-        "kind": data.spec.chart_type,
-        "title": data.spec.title,
-        "x_label": data.x_label,
-        "y_label": data.y_label,
-        "row_count": data.rows.len(),
-        "series": data.series,
-    })
-    .to_string()
-}
-
 /// JSON-Schema for the chart tool. Kept in lockstep with `ChartSpec`.
+///
+/// Two crucial details that have caused user-visible bugs when missed:
+/// - `annotation` is REQUIRED so the model writes the user-facing
+///   description in the same call as the chart. There is no follow-up
+///   "describe what you just rendered" round-trip.
+/// - The optional column fields say "OMIT entirely (do not send empty
+///   string)" because some models otherwise fill them with `""` for
+///   `count` aggregations and the column-validator rejects the call as
+///   "unknown column: ".
 fn chart_tool_definition() -> ToolDefinition {
     let schema = serde_json::json!({
         "type": "object",
@@ -987,35 +919,52 @@ fn chart_tool_definition() -> ToolDefinition {
                     "line", "area", "pie", "donut", "scatter", "histogram",
                     "treemap"
                 ],
-                "description": "Visual style. Use bar/pie for categorical; line/area for ordered/time-series; scatter for x↔y; histogram for the distribution of a single numeric column; stacked_bar/grouped_bar require a `groupBy` column for the second dimension."
+                "description": "bar/pie/donut for categorical share. line/area for ordered or time series. scatter for x↔y. histogram for the distribution of one numeric column. stacked_bar/grouped_bar require a groupBy column."
             },
-            "title": {"type": "string"},
-            "xColumn": {"type": "string", "description": "Existing column name for the x-axis (or category for pie/donut/treemap, or source column for histogram)."},
-            "yColumn": {"type": "string", "description": "Existing column name for the y-axis. Required unless aggregation = count."},
+            "title": {
+                "type": "string",
+                "description": "Short title shown above the chart."
+            },
+            "annotation": {
+                "type": "string",
+                "description": "REQUIRED. One or two sentences describing what the chart shows. This is the chat reply the user sees — write it as if you were explaining the chart to them. Describe the shape (e.g. 'Engineering dominates headcount; the long tail is in Operations.'); do NOT invent specific numbers."
+            },
+            "xColumn": {
+                "type": "string",
+                "description": "Existing column from the schema for the x-axis (or category for pie/donut/treemap, or source column for histogram)."
+            },
+            "yColumn": {
+                "type": "string",
+                "description": "Existing column from the schema for the y-axis. OMIT this field entirely (do NOT send an empty string) when aggregation = count."
+            },
             "aggregation": {
                 "type": "string",
                 "enum": ["count", "sum", "avg", "min", "max"],
-                "description": "Aggregate y over each x bucket. 'count' counts rows and ignores yColumn."
+                "description": "Aggregate y over each x bucket. Use 'count' for headcount-style charts (and OMIT yColumn). OMIT this field entirely when plotting raw rows (e.g. scatter, line over a time column)."
             },
-            "groupBy": {"type": "string", "description": "Optional second column for stacked_bar / grouped_bar / multi-series line / multi-series area."},
+            "groupBy": {
+                "type": "string",
+                "description": "Optional second column for stacked_bar / grouped_bar / multi-series line / area. OMIT entirely if not splitting into series — do NOT send an empty string."
+            },
             "limit": {"type": "integer", "description": "Cap the number of rows after sorting."},
             "order": {"type": "string", "enum": ["asc", "desc"], "description": "Sort by y value."},
-            "binCount": {"type": "integer", "description": "For histogram only — number of equal-width buckets. Defaults to 12."}
+            "binCount": {"type": "integer", "description": "histogram only — number of equal-width buckets. Defaults to 12."}
         },
-        "required": ["chartType", "title", "xColumn"]
+        "required": ["chartType", "title", "annotation", "xColumn"]
     });
     ToolDefinition {
         name: "make_chart".to_string(),
         description:
-            "Render a chart from the CSV currently open in this application. \
-             You MUST call this tool whenever the user asks for a chart, \
-             plot, graph, visualisation, distribution, breakdown, or 'show \
-             me'. Do NOT write Python, matplotlib, plotly, vega, or any \
-             other charting code in your reply — the app cannot execute it. \
-             Only this tool produces a chart visible to the user. \
-             You decide the chart_type and which columns to use; the system \
-             runs the SQL and draws the chart, so do not invent any values. \
-             After the tool returns, write a brief one-sentence interpretation."
+            "Render a chart from the CSV currently open in this app. Call \
+             this whenever the user asks for a chart / plot / graph / \
+             visualisation / distribution / breakdown / 'show me'. \
+             \n\nYou pick the chart kind and which columns; the host runs \
+             the SQL and renders the chart, so you cannot affect the \
+             values that appear. Write the user-facing description in the \
+             `annotation` argument — there is NO follow-up round to add \
+             commentary. Do NOT write Python / matplotlib / plotly / vega \
+             / any other charting code: the app cannot execute it and the \
+             user will see nothing."
                 .to_string(),
         parameters: schema,
     }

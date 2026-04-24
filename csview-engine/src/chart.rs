@@ -100,15 +100,26 @@ pub enum SortOrder {
 
 /// What the LLM tool call hands us. All column references are validated
 /// against the schema before any SQL is executed.
+///
+/// `annotation` is REQUIRED so the model writes the human-readable
+/// description at the same time as it picks the chart shape — there's
+/// no follow-up "describe what you just did" round-trip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartSpec {
     pub chart_type: ChartKind,
     pub title: String,
+    /// One- or two-sentence interpretation of what this chart shows.
+    /// Rendered under the title — no separate narrative LLM call needed.
+    #[serde(default)]
+    pub annotation: String,
     /// X-axis column (or pie/donut category, or histogram source column).
     pub x_column: String,
-    /// Y-axis column. Required unless `aggregation = Count`.
-    #[serde(default)]
+    /// Y-axis column. Required unless `aggregation = Count`. Empty
+    /// strings are treated the same as omitted (some models fill the
+    /// field with `""` for `count` even when the schema says it's
+    /// optional).
+    #[serde(default, deserialize_with = "deserialize_optional_nonempty_string")]
     pub y_column: Option<String>,
     /// Optional aggregation; when set, rows are grouped by `x_column`
     /// (and `group_by` if present). When `aggregation = Count`,
@@ -116,8 +127,8 @@ pub struct ChartSpec {
     #[serde(default)]
     pub aggregation: Option<Aggregation>,
     /// Optional second grouping column for stacked / grouped bars and
-    /// multi-series lines/areas.
-    #[serde(default)]
+    /// multi-series lines/areas. Empty strings → None.
+    #[serde(default, deserialize_with = "deserialize_optional_nonempty_string")]
     pub group_by: Option<String>,
     /// Cap the number of resulting rows (after sort).
     #[serde(default)]
@@ -128,6 +139,18 @@ pub struct ChartSpec {
     /// Histogram bucket count. Defaults to 12 if omitted.
     #[serde(default)]
     pub bin_count: Option<usize>,
+}
+
+/// Treat `""` and `null` the same as a missing field. Models occasionally
+/// supply empty strings for optional columns (e.g. `yColumn: ""` alongside
+/// `aggregation: "count"`) — without this, validation rejects the call as
+/// "unknown column: " which then leaks back to the user as a tool error.
+fn deserialize_optional_nonempty_string<'de, D>(d: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(d)?;
+    Ok(opt.filter(|s| !s.trim().is_empty()))
 }
 
 /// What the frontend renders. `data` is opaque JSON shaped to match the
@@ -490,12 +513,28 @@ mod tests {
         SqliteStore::from_csv(f.path().to_str().unwrap(), b',', true, &headers, &cols).unwrap()
     }
 
+    fn spec(chart_type: ChartKind, x: &str) -> ChartSpec {
+        ChartSpec {
+            chart_type,
+            title: "test".into(),
+            annotation: "test annotation".into(),
+            x_column: x.into(),
+            y_column: None,
+            aggregation: None,
+            group_by: None,
+            limit: None,
+            order: None,
+            bin_count: None,
+        }
+    }
+
     #[test]
     fn bar_chart_avg_salary_by_department() {
         let store = employees_store();
         let spec = ChartSpec {
             chart_type: ChartKind::Bar,
             title: "Avg salary by dept".into(),
+            annotation: "Engineering pays the most on average.".into(),
             x_column: "department".into(),
             y_column: Some("salary".into()),
             aggregation: Some(Aggregation::Avg),
@@ -519,6 +558,7 @@ mod tests {
         let spec = ChartSpec {
             chart_type: ChartKind::Pie,
             title: "Headcount".into(),
+            annotation: "Engineering has the largest headcount.".into(),
             x_column: "department".into(),
             y_column: None,
             aggregation: Some(Aggregation::Count),
@@ -541,17 +581,11 @@ mod tests {
     #[test]
     fn stacked_bar_requires_group_by() {
         let store = employees_store();
-        let spec = ChartSpec {
-            chart_type: ChartKind::StackedBar,
-            title: "x".into(),
-            x_column: "department".into(),
-            y_column: Some("salary".into()),
-            aggregation: Some(Aggregation::Sum),
-            group_by: None, // missing!
-            limit: None,
-            order: None,
-            bin_count: None,
-        };
+        let mut s = spec(ChartKind::StackedBar, "department");
+        s.y_column = Some("salary".into());
+        s.aggregation = Some(Aggregation::Sum);
+        // group_by intentionally omitted.
+        let spec = s;
         assert!(matches!(
             make_chart(&store, spec),
             Err(ChartError::Invalid(_))
@@ -561,17 +595,10 @@ mod tests {
     #[test]
     fn unknown_column_rejected_before_sql_runs() {
         let store = employees_store();
-        let spec = ChartSpec {
-            chart_type: ChartKind::Bar,
-            title: "x".into(),
-            x_column: "title".into(), // not in schema
-            y_column: Some("salary".into()),
-            aggregation: Some(Aggregation::Avg),
-            group_by: None,
-            limit: None,
-            order: None,
-            bin_count: None,
-        };
+        let mut s = spec(ChartKind::Bar, "title"); // 'title' not in schema
+        s.y_column = Some("salary".into());
+        s.aggregation = Some(Aggregation::Avg);
+        let spec = s;
         assert!(matches!(
             make_chart(&store, spec),
             Err(ChartError::UnknownColumn(_))
@@ -581,17 +608,9 @@ mod tests {
     #[test]
     fn histogram_buckets_into_n_bins() {
         let store = employees_store();
-        let spec = ChartSpec {
-            chart_type: ChartKind::Histogram,
-            title: "Salary distribution".into(),
-            x_column: "salary".into(),
-            y_column: None,
-            aggregation: None,
-            group_by: None,
-            limit: None,
-            order: None,
-            bin_count: Some(5),
-        };
+        let mut s = spec(ChartKind::Histogram, "salary");
+        s.bin_count = Some(5);
+        let spec = s;
         let chart = make_chart(&store, spec).unwrap();
         assert_eq!(chart.rows.len(), 5);
         let total: i64 = chart
@@ -602,20 +621,49 @@ mod tests {
         assert_eq!(total, 6); // all 6 rows landed in some bin
     }
 
+    /// Regression for the production "(unknown column: )" loop:
+    /// some models emit `yColumn: ""` alongside `aggregation: count`.
+    /// The custom deserializer should fold "" → None so the call works.
+    #[test]
+    fn empty_string_optional_columns_are_treated_as_none() {
+        let store = employees_store();
+        let json = serde_json::json!({
+            "chartType": "pie",
+            "title": "Headcount by dept",
+            "annotation": "Engineering dominates.",
+            "xColumn": "department",
+            "yColumn": "",       // ← was tripping validation as 'unknown column: '
+            "aggregation": "count",
+            "groupBy": "",       // also previously tripped
+        });
+        let spec: ChartSpec = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(spec.y_column, None);
+        assert_eq!(spec.group_by, None);
+        let chart = make_chart(&store, spec).expect("chart should render");
+        assert_eq!(chart.rows.len(), 4);
+    }
+
+    /// Annotation field is part of ChartSpec and round-trips through JSON.
+    #[test]
+    fn annotation_is_preserved_through_serde() {
+        let json = serde_json::json!({
+            "chartType": "bar",
+            "title": "x",
+            "annotation": "Engineering pays the most.",
+            "xColumn": "department",
+            "yColumn": "salary",
+            "aggregation": "avg",
+        });
+        let spec: ChartSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(spec.annotation, "Engineering pays the most.");
+    }
+
     #[test]
     fn line_chart_keeps_natural_x_order_when_unsorted() {
         let store = employees_store();
-        let spec = ChartSpec {
-            chart_type: ChartKind::Line,
-            title: "Salary by id".into(),
-            x_column: "id".into(),
-            y_column: Some("salary".into()),
-            aggregation: None,
-            group_by: None,
-            limit: None,
-            order: None,
-            bin_count: None,
-        };
+        let mut s = spec(ChartKind::Line, "id");
+        s.y_column = Some("salary".into());
+        let spec = s;
         let chart = make_chart(&store, spec).unwrap();
         assert!(chart.sql.contains("ORDER BY x ASC"));
         assert_eq!(chart.rows.len(), 6);

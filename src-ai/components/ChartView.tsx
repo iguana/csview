@@ -271,6 +271,7 @@ export function ChartView({ data }: ChartViewProps) {
   );
 }
 
+
 // Treemap rectangles need a custom renderer to get the colour ramp + label.
 function CustomTreemapCell(props: unknown) {
   // Recharts passes a lot of geometry props; type loosely.

@@ -50,6 +50,8 @@ export type ChartKind =
 export interface ChartSpec {
   chartType: ChartKind;
   title: string;
+  /** One or two sentences written by the model — doubles as the chat reply. */
+  annotation: string;
   xColumn: string;
   yColumn?: string;
   aggregation?: "count" | "sum" | "avg" | "min" | "max";

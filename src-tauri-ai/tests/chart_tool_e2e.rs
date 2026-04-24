@@ -97,18 +97,22 @@ fn chart_tool() -> ToolDefinition {
                     ]
                 },
                 "title": {"type": "string"},
+                "annotation": {
+                    "type": "string",
+                    "description": "REQUIRED. One or two sentences describing the chart shape — this is the chat reply the user sees."
+                },
                 "xColumn": {"type": "string"},
-                "yColumn": {"type": "string"},
+                "yColumn": {"type": "string", "description": "OMIT entirely (do not send empty string) when aggregation = count."},
                 "aggregation": {
                     "type": "string",
                     "enum": ["count", "sum", "avg", "min", "max"]
                 },
-                "groupBy": {"type": "string"},
+                "groupBy": {"type": "string", "description": "OMIT entirely if not splitting series."},
                 "limit": {"type": "integer"},
                 "order": {"type": "string", "enum": ["asc", "desc"]},
                 "binCount": {"type": "integer"}
             },
-            "required": ["chartType", "title", "xColumn"]
+            "required": ["chartType", "title", "annotation", "xColumn"]
         }),
     }
 }
@@ -374,112 +378,62 @@ async fn google_uses_tool_with_production_prompt() {
     .await;
 }
 
-/// **Regression test for the "(reached max chart-tool iterations)" bug.**
+/// **Single-round sub-agent design.**
 ///
-/// The production chat_message loops until the model returns text. If the
-/// model just keeps emitting tool calls (or, worse, never gets enough
-/// tokens to compose a reply after burning some on hidden reasoning), the
-/// loop hits its cap and the user sees a meaningless `(reached max…)`
-/// fallback string instead of either a chart description or a chart.
-///
-/// This test mirrors the production loop:
-///   1. call chat_with_tools with the chart tool
-///   2. on ToolCall: execute make_chart, push events, continue
-///   3. on Text: stop and assert non-empty
-///   4. if cap is hit with charts produced: do one final tools-disabled
-///      call to coerce a narrative — this MUST return non-empty text
-async fn run_full_chat_loop(client: LlmClient, label: &str, user_prompt: &str) {
-    use csviewai_lib::llm::client::ToolDefinition as TD;
+/// The new production chat_message does ONE round-trip with the chart
+/// tool exposed and reads the model-written `annotation` from the tool
+/// args as the chat reply. There is no tool loop, no narrative-only
+/// follow-up call. This test mirrors that flow exactly:
+///   1. one chat_with_tools call
+///   2. assert the model returned a tool call (not text)
+///   3. assert the args parse + the chart renders
+///   4. assert the model populated the `annotation` field — this IS the
+///      user-facing reply, so an empty / missing annotation is a bug
+async fn run_chat_subagent(client: LlmClient, label: &str, user_prompt: &str) {
     let store = employees_store();
     let schema_ctx = store.schema_context(5).expect("schema");
     let system = prompts::chat_system_prompt(&schema_ctx);
-    let tools: Vec<TD> = vec![chart_tool()];
-    let mut events: Vec<ToolEvent> = vec![ToolEvent::User(user_prompt.into())];
+    let tools = vec![chart_tool()];
+    let events = vec![ToolEvent::User(user_prompt.into())];
 
-    const MAX_ROUNDS: usize = 5;
-    let mut charts_made = 0usize;
-    let mut final_text = String::new();
-
-    for round in 0..MAX_ROUNDS {
-        let reply = client
-            .chat_with_tools(&system, &events, &tools, 4096)
-            .await
-            .unwrap_or_else(|e| panic!("[{label}] round {round}: {e:?}"));
-        match reply {
-            ToolReply::Text(t) => {
-                final_text = t;
-                break;
-            }
-            ToolReply::ToolCall {
-                call_id,
-                name,
-                arguments,
-            } => {
-                assert_eq!(name, "make_chart", "[{label}] unknown tool");
-                let spec: ChartSpec =
-                    serde_json::from_value(arguments.clone()).expect("decode chart spec");
-                eprintln!(
-                    "[{label}] round {round}: tool call kind={:?} x={}",
-                    spec.chart_type, spec.x_column
-                );
-                let chart = chart::make_chart(&store, spec.clone())
-                    .unwrap_or_else(|e| panic!("[{label}] make_chart failed: {e:?}"));
-                charts_made += 1;
-                let summary = serde_json::json!({
-                    "rendered": true,
-                    "kind": chart.spec.chart_type,
-                    "title": chart.spec.title,
-                    "row_count": chart.rows.len(),
-                });
-                events.push(ToolEvent::AssistantToolCall {
-                    call_id: call_id.clone(),
-                    name,
-                    arguments,
-                });
-                events.push(ToolEvent::ToolResult {
-                    call_id,
-                    output: summary.to_string(),
-                });
-            }
-        }
-    }
-
-    // Mirror the production fallback: if the loop never produced text but
-    // did produce charts, force one tools-disabled narrative call.
-    if final_text.is_empty() && charts_made > 0 {
-        eprintln!("[{label}] cap hit with {charts_made} chart(s); forcing narrative call");
-        let extra_system = format!(
-            "{system}\n\nThe chart(s) the user requested have already been \
-             rendered. Do NOT call any more tools. Reply with a brief one or \
-             two sentence interpretation."
-        );
-        let reply = client
-            .chat_with_tools(&extra_system, &events, &[], 2048)
-            .await
-            .unwrap_or_else(|e| panic!("[{label}] narrative call: {e:?}"));
-        match reply {
-            ToolReply::Text(t) => final_text = t,
-            ToolReply::ToolCall { name, .. } => {
-                panic!("[{label}] narrative-only call still tried to call {name}")
-            }
-        }
-    }
-
-    assert!(charts_made >= 1, "[{label}] no charts were rendered");
-    assert!(
-        !final_text.trim().is_empty(),
-        "[{label}] loop completed but produced no narrative text — \
-         this is the (reached max chart-tool iterations) bug"
-    );
+    let reply = client
+        .chat_with_tools(&system, &events, &tools, 4096)
+        .await
+        .unwrap_or_else(|e| panic!("[{label}]: {e:?}"));
+    let (name, arguments) = match reply {
+        ToolReply::ToolCall { name, arguments, .. } => (name, arguments),
+        ToolReply::Text(t) => panic!(
+            "[{label}] expected a make_chart tool call, got plain text:\n{t}"
+        ),
+    };
+    assert_eq!(name, "make_chart", "[{label}] wrong tool name");
+    let spec: ChartSpec = serde_json::from_value(arguments.clone()).unwrap_or_else(|e| {
+        panic!("[{label}] could not decode ChartSpec: {e}\nargs={arguments}")
+    });
     eprintln!(
-        "[{label}] ✓ {} chart(s) + narrative ({} chars)",
-        charts_made,
-        final_text.len()
+        "[{label}] kind={:?} x={} y={:?} agg={:?} annotation_len={}",
+        spec.chart_type,
+        spec.x_column,
+        spec.y_column,
+        spec.aggregation,
+        spec.annotation.len()
+    );
+    assert!(
+        !spec.annotation.trim().is_empty(),
+        "[{label}] model didn't populate `annotation` — this field IS the chat reply",
+    );
+    let chart = chart::make_chart(&store, spec.clone())
+        .unwrap_or_else(|e| panic!("[{label}] make_chart failed: {e:?}"));
+    assert!(!chart.rows.is_empty(), "[{label}] chart had no rows");
+    eprintln!(
+        "[{label}] ✓ {} rows, annotation: {:?}",
+        chart.rows.len(),
+        spec.annotation
     );
 }
 
 #[tokio::test]
-async fn openai_full_chat_loop_yields_charts_plus_narrative() {
+async fn openai_subagent_returns_chart_with_annotation() {
     load_env();
     let Ok(key) = std::env::var("OPENAI_API_KEY") else {
         eprintln!("skip: OPENAI_API_KEY not set");
@@ -490,16 +444,16 @@ async fn openai_full_chat_loop_yields_charts_plus_narrative() {
     }
     let model = std::env::var("CSVIEW_TEST_MODEL").unwrap_or_else(|_| "gpt-5.4".into());
     let client = LlmClient::new(Provider::OpenAI, key, model);
-    run_full_chat_loop(
+    run_chat_subagent(
         client,
-        "openai-loop",
+        "openai-subagent",
         "make me a chart of average salary by department",
     )
     .await;
 }
 
 #[tokio::test]
-async fn google_full_chat_loop_yields_charts_plus_narrative() {
+async fn google_subagent_returns_chart_with_annotation() {
     load_env();
     let Ok(key) = std::env::var("GEMINI_API_KEY") else {
         eprintln!("skip: GEMINI_API_KEY not set");
@@ -509,10 +463,36 @@ async fn google_full_chat_loop_yields_charts_plus_narrative() {
         return;
     }
     let client = LlmClient::new(Provider::Google, key, "gemini-2.5-flash".into());
-    run_full_chat_loop(
+    run_chat_subagent(
         client,
-        "google-loop",
+        "google-subagent",
         "make me a chart of average salary by department",
+    )
+    .await;
+}
+
+/// Regression for the production `(unknown column: )` retry loop:
+/// the model was sending `yColumn: ""` alongside `aggregation: count`
+/// and validation rejected the empty string. The custom serde deserializer
+/// folds "" → None; this test pokes the real LLM with a count-style prompt
+/// (the path that previously triggered the empty-string send) and asserts
+/// the chart renders.
+#[tokio::test]
+async fn openai_count_aggregation_does_not_send_empty_y_column() {
+    load_env();
+    let Ok(key) = std::env::var("OPENAI_API_KEY") else {
+        eprintln!("skip: OPENAI_API_KEY not set");
+        return;
+    };
+    if key.trim().is_empty() {
+        return;
+    }
+    let model = std::env::var("CSVIEW_TEST_MODEL").unwrap_or_else(|_| "gpt-5.4".into());
+    let client = LlmClient::new(Provider::OpenAI, key, model);
+    run_chat_subagent(
+        client,
+        "openai-count",
+        "show me a pie chart of the headcount in each department",
     )
     .await;
 }
