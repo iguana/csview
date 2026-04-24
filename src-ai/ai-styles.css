@@ -1447,6 +1447,33 @@
   color: var(--text-muted);
 }
 
+.account-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.model-refresh-btn {
+  font-size: 11px;
+  padding: 4px 10px;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 120ms, border-color 120ms, color 120ms;
+}
+.model-refresh-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: var(--accent);
+  color: var(--text);
+}
+.model-refresh-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .account-input {
   font: inherit;
   font-size: 12px;

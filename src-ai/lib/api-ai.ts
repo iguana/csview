@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AccountStatus,
   AnomalyReport,
+  AvailableModel,
   ChatResponse,
   ChatSession,
   ComplianceReport,
@@ -30,6 +31,9 @@ export const aiApi = {
   },
   getAccountStatus() {
     return invoke<AccountStatus>("get_account_status");
+  },
+  fetchProviderModels(provider: string, key: string) {
+    return invoke<AvailableModel[]>("fetch_provider_models", { provider, key });
   },
 
   // Feature 1: NL Query

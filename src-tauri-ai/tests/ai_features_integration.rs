@@ -531,6 +531,55 @@ async fn feature_11_forecast_narrative() {
 // Bonus: API surface guarantees
 // ---------------------------------------------------------------------------
 
+/// `fetch_models` should return a non-empty, chat-completable catalogue
+/// for the active provider's key. Catches:
+///   - upstream API shape changes (the JSON parser breaks)
+///   - over-aggressive filtering (everything filtered out)
+///   - auth-header regressions per provider
+#[tokio::test]
+async fn fetch_models_returns_a_usable_catalogue() {
+    let Some(client) = client() else {
+        return;
+    };
+    let models = client.fetch_models().await.expect("fetch models");
+    eprintln!(
+        "fetched {} models for {}",
+        models.len(),
+        client.provider()
+    );
+    assert!(!models.is_empty(), "provider returned zero usable models");
+    for m in &models {
+        assert!(!m.id.is_empty(), "fetched model has empty id");
+        assert!(!m.name.is_empty(), "fetched model has empty name");
+    }
+    // The first entry (highest tier) should round-trip through complete()
+    // so we know the id we just listed actually accepts requests.
+    let first = &models[0];
+    let probe = LlmClient::new(
+        client.provider(),
+        std::env::var(match client.provider() {
+            Provider::Anthropic => "ANTHROPIC_API_KEY",
+            Provider::OpenAI => "OPENAI_API_KEY",
+            Provider::Google => "GEMINI_API_KEY",
+        })
+        .unwrap_or_default(),
+        first.id.clone(),
+    );
+    // Reasoning-tier models burn output tokens on hidden reasoning before
+    // emitting any text, so give the probe enough headroom to actually
+    // produce visible output.
+    let reply = probe
+        .complete(
+            "you are a test",
+            "reply with the word OK and nothing else",
+            2048,
+        )
+        .await
+        .expect("fetched model should accept a chat request");
+    eprintln!("probe reply from {}: {reply:?}", first.id);
+    assert!(reply.to_uppercase().contains("OK"));
+}
+
 /// All `available_models()` entries should reference an id format the
 /// providers actually accept. We don't ping the API here, but we do guard
 /// against typos that would re-introduce the "must provide a model" bug.

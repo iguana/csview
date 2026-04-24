@@ -36,6 +36,12 @@ export function AccountPanel({ onStatusChange }: AccountPanelProps) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  // When the user clicks "Refresh from API", the live catalogue replaces
+  // the hardcoded list for the rest of the session. null = haven't asked
+  // the API yet → fall back to status.availableModels.
+  const [fetchedModels, setFetchedModels] = useState<AvailableModel[] | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshedAt, setRefreshedAt] = useState<Date | null>(null);
 
   // Load current status on mount
   useEffect(() => {
@@ -49,11 +55,49 @@ export function AccountPanel({ onStatusChange }: AccountPanelProps) {
     }).catch(() => {});
   }, [onStatusChange]);
 
-  // Filter models by selected provider
-  const allModels = status?.availableModels ?? [];
+  // When the user has hit Refresh, the live API list overrides the static
+  // catalogue (filtered to the current provider). Otherwise fall back to
+  // whatever the backend handed us at startup.
+  const allModels = fetchedModels ?? status?.availableModels ?? [];
   const filteredModels = allModels.filter(
     (m) => m.provider.toLowerCase() === provider,
   );
+
+  // A new provider selection invalidates a list fetched for the previous
+  // provider — clear the cache so the user sees the static fallback (or
+  // can hit Refresh again with the appropriate key).
+  useEffect(() => {
+    setFetchedModels(null);
+    setRefreshedAt(null);
+  }, [provider]);
+
+  const handleRefreshModels = useCallback(async () => {
+    if (!apiKey.trim()) {
+      setError("Enter the API key first, then click Refresh");
+      return;
+    }
+    setRefreshing(true);
+    setError(null);
+    try {
+      const live = await aiApi.fetchProviderModels(provider, apiKey.trim());
+      if (live.length === 0) {
+        setError("Provider returned no chat-completable models");
+      } else {
+        setFetchedModels(live);
+        setRefreshedAt(new Date());
+        // If the previously-selected model isn't in the new list, jump to
+        // the first reasoning-tier (or first overall) entry.
+        if (!live.find((m) => m.id === selectedModel)) {
+          const reasoning = live.find((m) => m.tier === "reasoning");
+          setSelectedModel(reasoning?.id ?? live[0].id);
+        }
+      }
+    } catch (e) {
+      setError(`Could not fetch models: ${errMsg(e)}`);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [apiKey, provider, selectedModel]);
 
   // Group by tier
   const tiers = ["reasoning", "balanced", "fast"];
@@ -159,7 +203,35 @@ export function AccountPanel({ onStatusChange }: AccountPanelProps) {
 
       {/* Model selector */}
       <div className="account-field">
-        <label className="account-label">Model</label>
+        <div className="account-label-row">
+          <label className="account-label">Model</label>
+          <button
+            type="button"
+            className="model-refresh-btn"
+            onClick={() => void handleRefreshModels()}
+            disabled={refreshing || !apiKey.trim()}
+            title={
+              !apiKey.trim()
+                ? "Enter the API key first"
+                : "Fetch the latest models available to this key from the provider's API"
+            }
+            data-testid="refresh-models-btn"
+          >
+            {refreshing ? "Refreshing…" : "↻ Refresh from API"}
+          </button>
+        </div>
+        {refreshedAt && (
+          <div className="account-hint">
+            Showing {filteredModels.length} live models from{" "}
+            {provInfo.label} (fetched {refreshedAt.toLocaleTimeString()}).
+          </div>
+        )}
+        {!refreshedAt && (
+          <div className="account-hint">
+            Built-in list shown — click Refresh to load the latest models
+            available to your {provInfo.label} key.
+          </div>
+        )}
         <div className="model-list">
           {modelsByTier.map(({ tier, label, models }) => (
             <div key={tier} className="model-tier-group">

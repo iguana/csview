@@ -197,6 +197,150 @@ impl LlmClient {
             .map_err(|e| LlmError::Parse(format!("json parse failed: {e}\nraw: {json_str}")))
     }
 
+    /// Ask the provider for the live model catalogue available to this key.
+    ///
+    /// Returns chat-completable models only. Embeddings, image, audio,
+    /// moderation, and other non-chat models are filtered out.
+    pub async fn fetch_models(&self) -> Result<Vec<ModelInfo>, LlmError> {
+        match self.provider {
+            Provider::OpenAI => self.fetch_models_openai().await,
+            Provider::Anthropic => self.fetch_models_anthropic().await,
+            Provider::Google => self.fetch_models_google().await,
+        }
+    }
+
+    async fn fetch_models_openai(&self) -> Result<Vec<ModelInfo>, LlmError> {
+        let resp = self
+            .http
+            .get("https://api.openai.com/v1/models")
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(LlmError::Api {
+                status: status.as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            });
+        }
+        let json: serde_json::Value = resp.json().await?;
+        let data = json
+            .get("data")
+            .and_then(|d| d.as_array())
+            .ok_or_else(|| LlmError::Parse("no 'data' array in OpenAI /models response".into()))?;
+        let mut out: Vec<ModelInfo> = data
+            .iter()
+            .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(str::to_string))
+            .filter(|id| is_openai_chat_model(id))
+            .map(|id| ModelInfo {
+                tier: classify_tier(&id),
+                name: id.clone(),
+                description: openai_description(&id),
+                id,
+                provider: Provider::OpenAI,
+            })
+            .collect();
+        sort_for_display(&mut out);
+        Ok(out)
+    }
+
+    async fn fetch_models_anthropic(&self) -> Result<Vec<ModelInfo>, LlmError> {
+        let resp = self
+            .http
+            .get("https://api.anthropic.com/v1/models")
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(LlmError::Api {
+                status: status.as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            });
+        }
+        let json: serde_json::Value = resp.json().await?;
+        let data = json
+            .get("data")
+            .and_then(|d| d.as_array())
+            .ok_or_else(|| LlmError::Parse("no 'data' array in Anthropic /models response".into()))?;
+        let mut out: Vec<ModelInfo> = data
+            .iter()
+            .filter_map(|m| {
+                let id = m.get("id").and_then(|i| i.as_str())?.to_string();
+                let display = m
+                    .get("display_name")
+                    .and_then(|d| d.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| id.clone());
+                Some(ModelInfo {
+                    tier: classify_tier(&id),
+                    name: display,
+                    description: String::new(),
+                    id,
+                    provider: Provider::Anthropic,
+                })
+            })
+            .collect();
+        sort_for_display(&mut out);
+        Ok(out)
+    }
+
+    async fn fetch_models_google(&self) -> Result<Vec<ModelInfo>, LlmError> {
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models?key={}",
+            self.api_key
+        );
+        let resp = self.http.get(&url).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(LlmError::Api {
+                status: status.as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            });
+        }
+        let json: serde_json::Value = resp.json().await?;
+        let data = json
+            .get("models")
+            .and_then(|d| d.as_array())
+            .ok_or_else(|| LlmError::Parse("no 'models' array in Gemini response".into()))?;
+        let mut out: Vec<ModelInfo> = data
+            .iter()
+            .filter_map(|m| {
+                let supports_generate = m
+                    .get("supportedGenerationMethods")
+                    .and_then(|s| s.as_array())
+                    .map(|a| a.iter().any(|v| v.as_str() == Some("generateContent")))
+                    .unwrap_or(false);
+                if !supports_generate {
+                    return None;
+                }
+                // Gemini returns "models/<id>"; strip the prefix for the
+                // API call shape used elsewhere in this client.
+                let raw = m.get("name").and_then(|n| n.as_str())?;
+                let id = raw.strip_prefix("models/").unwrap_or(raw).to_string();
+                let display = m
+                    .get("displayName")
+                    .and_then(|d| d.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| id.clone());
+                Some(ModelInfo {
+                    tier: classify_tier(&id),
+                    name: display,
+                    description: m
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_default(),
+                    id,
+                    provider: Provider::Google,
+                })
+            })
+            .collect();
+        sort_for_display(&mut out);
+        Ok(out)
+    }
+
     /// Multi-turn chat. Returns the assistant's text.
     pub async fn chat(
         &self,
@@ -247,41 +391,64 @@ impl LlmClient {
     }
 
     // --- OpenAI --------------------------------------------------------------
+    //
+    // Uses the v1/responses endpoint (not legacy v1/chat/completions) so that
+    // both classic chat models (gpt-4.x, gpt-5) and the newer reasoning /
+    // pro variants work without a separate code path. Responses returns a
+    // convenience `output_text` field plus a structured `output` array — we
+    // try `output_text` first and fall back to the array for forward-compat.
 
-    async fn complete_openai(&self, system: &str, user_msg: &str, max_tokens: u32) -> Result<String, LlmError> {
+    async fn complete_openai(
+        &self,
+        system: &str,
+        user_msg: &str,
+        max_tokens: u32,
+    ) -> Result<String, LlmError> {
         let body = serde_json::json!({
             "model": self.model,
-            "max_completion_tokens": max_tokens,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_msg}
-            ]
+            "instructions": system,
+            "input": user_msg,
+            "max_output_tokens": max_tokens,
         });
-        let resp = self.http
-            .post("https://api.openai.com/v1/chat/completions")
+        self.openai_responses_call(body).await
+    }
+
+    async fn chat_openai(
+        &self,
+        system: &str,
+        messages: &[ChatMessage],
+        max_tokens: u32,
+    ) -> Result<String, LlmError> {
+        let input: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
+            .collect();
+        let body = serde_json::json!({
+            "model": self.model,
+            "instructions": system,
+            "input": input,
+            "max_output_tokens": max_tokens,
+        });
+        self.openai_responses_call(body).await
+    }
+
+    async fn openai_responses_call(&self, body: serde_json::Value) -> Result<String, LlmError> {
+        let resp = self
+            .http
+            .post("https://api.openai.com/v1/responses")
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&body)
             .send()
             .await?;
         let status = resp.status();
         if !status.is_success() {
-            return Err(LlmError::Api { status: status.as_u16(), message: resp.text().await.unwrap_or_default() });
+            return Err(LlmError::Api {
+                status: status.as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            });
         }
         let json: serde_json::Value = resp.json().await?;
-        extract_openai_text(&json)
-    }
-
-    async fn chat_openai(&self, system: &str, messages: &[ChatMessage], max_tokens: u32) -> Result<String, LlmError> {
-        let mut msgs = vec![serde_json::json!({"role": "system", "content": system})];
-        for m in messages {
-            msgs.push(serde_json::json!({"role": m.role, "content": m.content}));
-        }
-        let body = serde_json::json!({"model": self.model, "max_completion_tokens": max_tokens, "messages": msgs});
-        let resp = self.http.post("https://api.openai.com/v1/chat/completions").header("Authorization", format!("Bearer {}", self.api_key)).json(&body).send().await?;
-        let status = resp.status();
-        if !status.is_success() { return Err(LlmError::Api { status: status.as_u16(), message: resp.text().await.unwrap_or_default() }); }
-        let json: serde_json::Value = resp.json().await?;
-        extract_openai_text(&json)
+        extract_openai_responses_text(&json)
     }
 
     // --- Google Gemini -------------------------------------------------------
@@ -360,14 +527,49 @@ fn extract_anthropic_text(json: &serde_json::Value) -> Result<String, LlmError> 
     Err(LlmError::Parse("no text block in Anthropic response".into()))
 }
 
-fn extract_openai_text(json: &serde_json::Value) -> Result<String, LlmError> {
-    json.get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| LlmError::Parse("no content in OpenAI response".into()))
+/// Extract assistant text from a v1/responses payload. Tries the convenience
+/// `output_text` first, then walks the structured `output` array.
+fn extract_openai_responses_text(json: &serde_json::Value) -> Result<String, LlmError> {
+    if let Some(t) = json.get("output_text").and_then(|t| t.as_str()) {
+        if !t.is_empty() {
+            return Ok(t.to_string());
+        }
+    }
+    let output = json
+        .get("output")
+        .and_then(|o| o.as_array())
+        .ok_or_else(|| LlmError::Parse("no 'output' array in OpenAI Responses payload".into()))?;
+    let mut buf = String::new();
+    for item in output {
+        if item.get("type").and_then(|t| t.as_str()) != Some("message") {
+            continue;
+        }
+        if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
+            for part in content {
+                let kind = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                if kind == "output_text" || kind == "text" {
+                    if let Some(s) = part.get("text").and_then(|t| t.as_str()) {
+                        buf.push_str(s);
+                    }
+                }
+            }
+        }
+    }
+    if buf.is_empty() {
+        // Reasoning models consume tokens silently before producing text;
+        // surface that case explicitly so the caller can bump max_tokens
+        // instead of staring at an opaque "no text" error.
+        let status = json
+            .get("status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("unknown");
+        let usage = json.get("usage").map(|u| u.to_string()).unwrap_or_default();
+        return Err(LlmError::Parse(format!(
+            "OpenAI Responses returned no text (status={status}, usage={usage}). \
+             For reasoning models, raise max_output_tokens."
+        )));
+    }
+    Ok(buf)
 }
 
 fn extract_gemini_text(json: &serde_json::Value) -> Result<String, LlmError> {
@@ -380,6 +582,82 @@ fn extract_gemini_text(json: &serde_json::Value) -> Result<String, LlmError> {
         .and_then(|t| t.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| LlmError::Parse("no text in Gemini response".into()))
+}
+
+/// True for OpenAI model ids that the chat-completions endpoint accepts.
+/// Excludes embeddings, dall-e, whisper/tts, moderation, fine-tuned base
+/// snapshots, and other non-chat heads.
+fn is_openai_chat_model(id: &str) -> bool {
+    let l = id.to_lowercase();
+    // Hard excludes first.
+    let excludes = [
+        "embedding",
+        "embed",
+        "dall-e",
+        "dalle",
+        "whisper",
+        "tts",
+        "moderation",
+        "babbage",
+        "davinci-002",
+        "image",
+        "audio",
+        "sora",
+        "transcribe",
+        "search",
+        "computer-use",
+        "realtime",
+    ];
+    if excludes.iter().any(|s| l.contains(s)) {
+        return false;
+    }
+    // Allow gpt-*, o<digit>, chatgpt-*. Reject anything else.
+    l.starts_with("gpt-")
+        || l.starts_with("chatgpt-")
+        || l.starts_with("o1")
+        || l.starts_with("o3")
+        || l.starts_with("o4")
+        || l.starts_with("o5")
+}
+
+/// Best-effort tier classification from the model id.
+fn classify_tier(id: &str) -> ModelTier {
+    let l = id.to_lowercase();
+    if ["mini", "nano", "haiku", "flash", "lite"]
+        .iter()
+        .any(|s| l.contains(s))
+    {
+        ModelTier::Fast
+    } else if ["o1", "o3", "o4", "o5", "opus", "pro", "thinking", "reasoning"]
+        .iter()
+        .any(|s| l.contains(s))
+    {
+        ModelTier::Reasoning
+    } else {
+        ModelTier::Balanced
+    }
+}
+
+fn openai_description(id: &str) -> String {
+    let tier = classify_tier(id);
+    match tier {
+        ModelTier::Reasoning => "Reasoning-class OpenAI model".into(),
+        ModelTier::Balanced => "OpenAI chat model".into(),
+        ModelTier::Fast => "Fast / cost-optimised OpenAI model".into(),
+    }
+}
+
+/// Sort by tier (Reasoning, Balanced, Fast), then name within each tier.
+/// Keeps the strongest models near the top of the picker.
+fn sort_for_display(models: &mut [ModelInfo]) {
+    fn rank(t: ModelTier) -> u8 {
+        match t {
+            ModelTier::Reasoning => 0,
+            ModelTier::Balanced => 1,
+            ModelTier::Fast => 2,
+        }
+    }
+    models.sort_by(|a, b| rank(a.tier).cmp(&rank(b.tier)).then(a.id.cmp(&b.id)));
 }
 
 fn strip_code_fences(s: &str) -> &str {

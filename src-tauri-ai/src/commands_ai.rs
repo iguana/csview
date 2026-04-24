@@ -306,17 +306,10 @@ pub async fn set_api_key(
         "anthropic" => Provider::Anthropic,
         _ => return Err(CommandError::InvalidArg(format!("unknown provider: {provider}"))),
     };
-    // Sanity-check that the model is one we know about for this provider so
-    // the request body always has a valid model and we fail fast at config
-    // time rather than on the first chat call.
-    if !available_models()
-        .iter()
-        .any(|m| m.id == model && m.provider == prov)
-    {
-        return Err(CommandError::InvalidArg(format!(
-            "model '{model}' is not in the {provider} model list"
-        )));
-    }
+    // We deliberately do NOT validate `model` against a static allowlist —
+    // providers ship new model ids regularly and we surface them via the
+    // refresh button (see `fetch_provider_models`). The non-empty check
+    // above is enough to prevent the "you must provide a model" 400.
     let client = LlmClient::new(prov, key.clone(), model.clone());
 
     {
@@ -356,6 +349,40 @@ pub fn get_account_status(state: State<'_, AiAppState>) -> Result<AccountStatus,
             })
             .collect(),
     })
+}
+
+/// Fetch the live model catalogue from a provider, using a freshly-supplied
+/// API key (so the user can probe before committing). Returns the same
+/// `AvailableModel` shape the AccountPanel already renders.
+#[tauri::command]
+pub async fn fetch_provider_models(
+    provider: String,
+    key: String,
+) -> Result<Vec<AvailableModel>, CommandError> {
+    if key.trim().is_empty() {
+        return Err(CommandError::InvalidArg(
+            "API key required to list models".into(),
+        ));
+    }
+    let prov = match provider.to_lowercase().as_str() {
+        "openai" => Provider::OpenAI,
+        "google" => Provider::Google,
+        "anthropic" => Provider::Anthropic,
+        _ => return Err(CommandError::InvalidArg(format!("unknown provider: {provider}"))),
+    };
+    // Model arg is unused for the listing endpoint; pass a placeholder.
+    let client = LlmClient::new(prov, key, String::new());
+    let models = client.fetch_models().await.map_err(llm_error_to_command_error)?;
+    Ok(models
+        .into_iter()
+        .map(|m| AvailableModel {
+            id: m.id,
+            name: m.name,
+            provider: format!("{}", m.provider),
+            tier: format!("{:?}", m.tier).to_lowercase(),
+            description: m.description,
+        })
+        .collect())
 }
 
 /// Default model for each provider when only an env-var key is found and no
