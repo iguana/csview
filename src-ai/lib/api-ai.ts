@@ -144,4 +144,10 @@ export const csvApi = {
   closeFile(fileId: string) {
     return invoke<void>("close_file", { fileId });
   },
+  newWindow() {
+    return invoke<void>("new_window");
+  },
+  openInNewWindow(path: string) {
+    return invoke<void>("open_in_new_window", { path });
+  },
 };

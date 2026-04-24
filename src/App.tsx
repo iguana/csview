@@ -733,6 +733,22 @@ export function App() {
         case "open":
           void onOpenClick();
           return;
+        case "open_in_new_window":
+          void (async () => {
+            try {
+              const sel = await openDialog({
+                multiple: false,
+                filters: [
+                  { name: "CSV / TSV", extensions: ["csv", "tsv", "txt"] },
+                  { name: "All files", extensions: ["*"] },
+                ],
+              });
+              if (typeof sel === "string") await api.openInNewWindow(sel);
+            } catch (e) {
+              setError(errMsg(e));
+            }
+          })();
+          return;
         case "save":
           void doSave();
           return;

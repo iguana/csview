@@ -40,6 +40,11 @@ pub fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
                 .accelerator("CmdOrCtrl+O")
                 .build(app)?,
         )
+        .item(
+            &MenuItemBuilder::with_id("menu.open_in_new_window", "Open CSV in New Window…")
+                .accelerator("CmdOrCtrl+Shift+O")
+                .build(app)?,
+        )
         .separator()
         .item(
             &MenuItemBuilder::with_id("menu.save", "Save")

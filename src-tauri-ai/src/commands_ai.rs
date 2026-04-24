@@ -295,12 +295,28 @@ pub async fn set_api_key(
     if key.trim().is_empty() {
         return Err(CommandError::InvalidArg("API key must not be empty".into()));
     }
+    if model.trim().is_empty() {
+        return Err(CommandError::InvalidArg(
+            "Model must not be empty — pick one from the model list before saving".into(),
+        ));
+    }
     let prov = match provider.to_lowercase().as_str() {
         "openai" => Provider::OpenAI,
         "google" => Provider::Google,
         "anthropic" => Provider::Anthropic,
         _ => return Err(CommandError::InvalidArg(format!("unknown provider: {provider}"))),
     };
+    // Sanity-check that the model is one we know about for this provider so
+    // the request body always has a valid model and we fail fast at config
+    // time rather than on the first chat call.
+    if !available_models()
+        .iter()
+        .any(|m| m.id == model && m.provider == prov)
+    {
+        return Err(CommandError::InvalidArg(format!(
+            "model '{model}' is not in the {provider} model list"
+        )));
+    }
     let client = LlmClient::new(prov, key.clone(), model.clone());
 
     {
@@ -342,28 +358,72 @@ pub fn get_account_status(state: State<'_, AiAppState>) -> Result<AccountStatus,
     })
 }
 
-/// Auto-detect API keys from environment variables and configure the client.
-/// Called on startup from lib.rs setup().
+/// Default model for each provider when only an env-var key is found and no
+/// previous selection has been persisted.
+fn default_model_for(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Anthropic => "claude-sonnet-4-20250514",
+        Provider::OpenAI => "gpt-4.1",
+        Provider::Google => "gemini-2.5-flash",
+    }
+}
+
+/// Restore a previously saved (provider, key, model) row from the app DB.
+/// Returns the configured client, or None if nothing is saved.
+fn load_saved_account(state: &AiAppState) -> Option<LlmClient> {
+    let db = state.app_db.lock();
+    let row: Option<(String, String)> = db
+        .query_row(
+            "SELECT api_key, model FROM account WHERE id = 1",
+            [],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+        .ok();
+    drop(db);
+    let (combined, model) = row?;
+    // The api_key column stores "{provider}:{actual_key}" (see set_api_key).
+    let (provider_str, key) = combined.split_once(':')?;
+    let provider = match provider_str.to_lowercase().as_str() {
+        "openai" => Provider::OpenAI,
+        "google" => Provider::Google,
+        "anthropic" => Provider::Anthropic,
+        _ => return None,
+    };
+    if key.is_empty() || model.is_empty() {
+        return None;
+    }
+    Some(LlmClient::new(provider, key.to_string(), model))
+}
+
+/// Configure the LLM client on startup. Priority:
+///   1. Previously saved account in the local DB (whatever the user last picked).
+///   2. ANTHROPIC_API_KEY env var → default Anthropic model.
+///   3. OPENAI_API_KEY env var → default OpenAI model.
+///   4. GEMINI_API_KEY env var → default Google model.
+///
+/// The first match wins so a user-configured choice is never silently
+/// overwritten by an env var hanging around in the shell.
 pub fn auto_detect_keys(state: &AiAppState) {
-    // Try env vars in order of preference
-    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-        if !key.is_empty() {
-            let client = LlmClient::new(Provider::Anthropic, key, "claude-sonnet-4-20250514".into());
-            *state.llm.lock() = Some(client);
-            return;
-        }
+    if let Some(client) = load_saved_account(state) {
+        *state.llm.lock() = Some(client);
+        return;
     }
-    if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-        if !key.is_empty() {
-            let client = LlmClient::new(Provider::OpenAI, key, "gpt-4.1".into());
-            *state.llm.lock() = Some(client);
-            return;
-        }
-    }
-    if let Ok(key) = std::env::var("GEMINI_API_KEY") {
-        if !key.is_empty() {
-            let client = LlmClient::new(Provider::Google, key, "gemini-2.5-flash".into());
-            *state.llm.lock() = Some(client);
+    let candidates = [
+        ("ANTHROPIC_API_KEY", Provider::Anthropic),
+        ("OPENAI_API_KEY", Provider::OpenAI),
+        ("GEMINI_API_KEY", Provider::Google),
+    ];
+    for (env_var, provider) in candidates {
+        if let Ok(key) = std::env::var(env_var) {
+            if !key.is_empty() {
+                let client = LlmClient::new(
+                    provider,
+                    key,
+                    default_model_for(provider).to_string(),
+                );
+                *state.llm.lock() = Some(client);
+                return;
+            }
         }
     }
 }

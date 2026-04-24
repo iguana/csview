@@ -53,6 +53,8 @@ pub fn run() {
             commands_csv::save_csv_as,
             commands_csv::get_schema,
             commands_csv::close_file,
+            commands_csv::new_window,
+            commands_csv::open_in_new_window,
             // Account
             commands_ai::set_api_key,
             commands_ai::get_account_status,

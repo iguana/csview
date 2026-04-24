@@ -9,7 +9,7 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State, WebviewUrl, WebviewWindowBuilder};
 use uuid::Uuid;
 
 use csview_engine::engine::{ColumnKind, ColumnMeta};
@@ -404,5 +404,43 @@ pub fn close_file(state: State<'_, AiAppState>, file_id: String) -> Result<(), C
         .remove(&file_id)
         .ok_or_else(|| CommandError::UnknownFile(file_id.clone()))?;
     state.open_paths.lock().remove(&file_id);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Multi-window
+// ---------------------------------------------------------------------------
+
+/// Spawn a fresh empty csviewai window.
+#[tauri::command]
+pub fn new_window(app: AppHandle) -> Result<(), CommandError> {
+    spawn_window(&app, None)
+}
+
+/// Spawn a new csviewai window already loading the given CSV path.
+#[tauri::command]
+pub fn open_in_new_window(app: AppHandle, path: String) -> Result<(), CommandError> {
+    spawn_window(&app, Some(path))
+}
+
+fn spawn_window(app: &AppHandle, path: Option<String>) -> Result<(), CommandError> {
+    let label = format!("w{}", Uuid::new_v4().simple());
+    let window = WebviewWindowBuilder::new(app, &label, WebviewUrl::default())
+        .title("csviewai")
+        .inner_size(1440.0, 900.0)
+        .min_inner_size(640.0, 400.0)
+        .title_bar_style(tauri::TitleBarStyle::Transparent)
+        .hidden_title(true)
+        .build()
+        .map_err(|e| CommandError::InvalidArg(e.to_string()))?;
+    if let Some(p) = path {
+        // Give the new webview a moment to mount its listeners before the
+        // startup file event lands; mirrors the pattern used by csview.
+        let w = window.clone();
+        tauri::async_runtime::spawn(async move {
+            std::thread::sleep(std::time::Duration::from_millis(700));
+            let _ = w.emit("cli-open-file", p);
+        });
+    }
     Ok(())
 }

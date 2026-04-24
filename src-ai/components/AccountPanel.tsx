@@ -202,7 +202,8 @@ export function AccountPanel({ onStatusChange }: AccountPanelProps) {
         <button
           className="primary"
           onClick={() => void handleSave()}
-          disabled={saving || !apiKey.trim()}
+          disabled={saving || !apiKey.trim() || !selectedModel}
+          title={!selectedModel ? "Select a model first" : undefined}
           data-testid="save-key-btn"
         >
           {saving ? "Connecting…" : "Save & Connect"}

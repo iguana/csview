@@ -34,3 +34,14 @@ These are straightforward adapter-layer fixes, not missing features.
 
 5. **Pricing** — The plan mentions free (csview) vs paid (csviewai) tiers. No pricing or billing is implemented. The current architecture just requires an API key.
    - **Status**: Not blocking for development. Pricing/billing can be added later.
+
+## Follow-ups
+
+- **Move API-key storage out of SQLite into the macOS Keychain** via
+  `tauri-plugin-keyring`. Today the key sits unencrypted at
+  `~/Library/Application Support/dev.csview.ai/csviewai.db` in the
+  `account` table (`api_key` column stores `"{provider}:{raw_key}"`).
+  The plugin would scope the secret to the user account / app and avoid
+  surfacing it in disk backups, sync drives, or process inspections.
+  Migration: on first launch, if a row exists in `account`, copy the key
+  into the keychain and clear the column.

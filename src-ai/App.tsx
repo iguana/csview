@@ -471,6 +471,28 @@ export function App() {
     const off = listen<string>("menu-action", (event) => {
       const id = event.payload;
       switch (id) {
+        case "new_window":
+          void csvApi.newWindow();
+          return;
+        case "open":
+          void onOpenClick();
+          return;
+        case "open_in_new_window":
+          void (async () => {
+            try {
+              const sel = await openDialog({
+                multiple: false,
+                filters: [
+                  { name: "CSV / TSV", extensions: ["csv", "tsv", "txt"] },
+                  { name: "All files", extensions: ["*"] },
+                ],
+              });
+              if (typeof sel === "string") await csvApi.openInNewWindow(sel);
+            } catch (e) {
+              setError(errMsg(e));
+            }
+          })();
+          return;
         case "save":
           void doSave();
           return;
