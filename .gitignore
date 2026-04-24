@@ -44,6 +44,23 @@ lerna-debug.log*
 .env.*
 !.env.example
 
+# Local databases / secrets caches — never commit. csviewai's account DB
+# lives in ~/Library/Application Support/dev.csview.ai/ at runtime; these
+# patterns guard against any stray copy landing in the repo (debug dump,
+# test fixture, hand-edited file pulled out for inspection).
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.key
+*.pem
+*.p12
+
 # TS build info
 *.tsbuildinfo
 
