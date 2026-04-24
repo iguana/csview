@@ -8,6 +8,7 @@
 //! - [`join`] — inner/outer join engine
 //! - [`quality`] — data quality auditing and PII detection
 
+pub mod chart;
 pub mod engine;
 pub mod expr;
 pub mod join;

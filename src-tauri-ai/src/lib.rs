@@ -59,6 +59,7 @@ pub fn run() {
             commands_ai::set_api_key,
             commands_ai::get_account_status,
             commands_ai::fetch_provider_models,
+            commands_ai::make_chart,
             // Feature 1 — NL query
             commands_ai::nl_query,
             // Feature 2 — Data profile

@@ -1,0 +1,311 @@
+//! End-to-end chart-tool integration tests.
+//!
+//! Verifies that the chart-making tool works through the real LLM tool
+//! calling APIs of every provider with a key in `.env`. For each provider:
+//!
+//! 1. Fire `chat_with_tools` with the chart tool definition + the prompt
+//!    "show me a bar chart of average salary by department".
+//! 2. Assert the model returns a `ToolCall` for `make_chart` (not just text).
+//! 3. Decode the JSON args into `ChartSpec`, run it against the real
+//!    SqliteStore built from samples/employees.csv, and assert:
+//!      - chart_type matches what was requested
+//!      - SQL contains AVG and GROUP BY
+//!      - the rendered data has 6 rows (the dataset's 6 distinct depts)
+//!      - the values are non-empty numbers
+//!
+//! Each provider has its own #[tokio::test]; tests skip with a printed
+//! reason when no key is present rather than failing.
+
+use csview_engine::chart::{self, ChartKind, ChartSpec};
+use csview_engine::engine::{ColumnKind, ColumnMeta};
+use csview_engine::sqlite_store::SqliteStore;
+use csviewai_lib::llm::client::{LlmClient, Provider, ToolDefinition, ToolEvent, ToolReply};
+
+use std::path::PathBuf;
+use std::sync::Once;
+
+static ENV_INIT: Once = Once::new();
+fn load_env() {
+    ENV_INIT.call_once(|| {
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(".env");
+        if p.exists() {
+            let _ = dotenvy::from_path(&p);
+        }
+    });
+}
+
+fn employees_store() -> SqliteStore {
+    let csv_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("samples")
+        .join("employees.csv");
+    let headers = vec![
+        "id".into(),
+        "first_name".into(),
+        "last_name".into(),
+        "department".into(),
+        "title".into(),
+        "salary".into(),
+        "hired_on".into(),
+        "active".into(),
+    ];
+    let cols = vec![
+        col(0, "id", ColumnKind::Integer),
+        col(1, "first_name", ColumnKind::String),
+        col(2, "last_name", ColumnKind::String),
+        col(3, "department", ColumnKind::String),
+        col(4, "title", ColumnKind::String),
+        col(5, "salary", ColumnKind::Integer),
+        col(6, "hired_on", ColumnKind::Date),
+        col(7, "active", ColumnKind::Boolean),
+    ];
+    SqliteStore::from_csv(csv_path.to_str().unwrap(), b',', true, &headers, &cols)
+        .expect("import sample csv")
+}
+
+fn col(i: usize, name: &str, kind: ColumnKind) -> ColumnMeta {
+    ColumnMeta {
+        index: i,
+        name: name.into(),
+        kind,
+    }
+}
+
+/// Same JSON-schema shape as the production `chart_tool_definition` in
+/// commands_ai.rs (which we can't depend on from a test crate without
+/// adding plumbing — so we inline the equivalent definition).
+fn chart_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "make_chart".into(),
+        description:
+            "Render a chart from the open CSV. The system runs the SQL and \
+             draws the chart — DO NOT invent values, only choose the chart \
+             type and which columns to use."
+                .into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "chartType": {
+                    "type": "string",
+                    "enum": [
+                        "bar", "horizontal_bar", "stacked_bar", "grouped_bar",
+                        "line", "area", "pie", "donut", "scatter", "histogram",
+                        "treemap"
+                    ]
+                },
+                "title": {"type": "string"},
+                "xColumn": {"type": "string"},
+                "yColumn": {"type": "string"},
+                "aggregation": {
+                    "type": "string",
+                    "enum": ["count", "sum", "avg", "min", "max"]
+                },
+                "groupBy": {"type": "string"},
+                "limit": {"type": "integer"},
+                "order": {"type": "string", "enum": ["asc", "desc"]},
+                "binCount": {"type": "integer"}
+            },
+            "required": ["chartType", "title", "xColumn"]
+        }),
+    }
+}
+
+fn schema_summary() -> String {
+    "Table: data\nRows: 50\nColumns:\n\
+     - id (Integer)\n\
+     - first_name (String)\n\
+     - last_name (String)\n\
+     - department (String): 6 distinct values\n\
+     - title (String): 19 distinct values\n\
+     - salary (Integer): 5 distinct quintiles\n\
+     - hired_on (Date)\n\
+     - active (Boolean)\n"
+        .to_string()
+}
+
+/// Drive a single round of the tool loop. Ask the model to chart something,
+/// expect a `make_chart` tool call back, decode + execute it, and assert
+/// the deterministic shape of the rendered data.
+async fn run_chart_round(
+    client: LlmClient,
+    label: &str,
+    user_prompt: &str,
+    expected_kind: ChartKind,
+    expected_row_count: usize,
+) {
+    let store = employees_store();
+    let tools = vec![chart_tool()];
+    let system = format!(
+        "You are a helpful data assistant. The user has a CSV open. When they \
+         ask for a visualisation, call the make_chart tool — never describe \
+         a chart in text. Schema:\n{}",
+        schema_summary()
+    );
+    let events = vec![ToolEvent::User(user_prompt.into())];
+    let reply = client
+        .chat_with_tools(&system, &events, &tools, 2048)
+        .await
+        .unwrap_or_else(|e| panic!("[{label}] tool-call request failed: {e:?}"));
+    let (call_id, name, args) = match reply {
+        ToolReply::ToolCall {
+            call_id,
+            name,
+            arguments,
+        } => (call_id, name, arguments),
+        ToolReply::Text(t) => panic!(
+            "[{label}] expected tool call, got plain text reply:\n{t}"
+        ),
+    };
+    eprintln!("[{label}] tool call name={name} args={args}");
+    assert_eq!(name, "make_chart", "[{label}] wrong tool name");
+    assert!(!call_id.is_empty(), "[{label}] empty call_id");
+
+    let spec: ChartSpec = serde_json::from_value(args.clone())
+        .unwrap_or_else(|e| panic!("[{label}] could not decode ChartSpec: {e}\nargs={args}"));
+    eprintln!(
+        "[{label}] decoded spec: kind={:?} x={} y={:?} agg={:?}",
+        spec.chart_type, spec.x_column, spec.y_column, spec.aggregation
+    );
+    assert_eq!(
+        spec.chart_type, expected_kind,
+        "[{label}] model picked wrong chart kind"
+    );
+
+    let chart = chart::make_chart(&store, spec).expect("chart computation");
+    eprintln!(
+        "[{label}] sql={}\n[{label}] rows.len={} (expected {})",
+        chart.sql,
+        chart.rows.len(),
+        expected_row_count
+    );
+    assert_eq!(
+        chart.rows.len(),
+        expected_row_count,
+        "[{label}] wrong number of chart rows"
+    );
+    // Every row should have a non-null y value.
+    for r in &chart.rows {
+        assert!(
+            r.get("y").map(|v| !v.is_null()).unwrap_or(false),
+            "[{label}] row missing y: {r}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// One #[tokio::test] per provider (skipping when the key isn't present).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn openai_makes_a_bar_chart() {
+    load_env();
+    let Ok(key) = std::env::var("OPENAI_API_KEY") else {
+        eprintln!("skip: OPENAI_API_KEY not set");
+        return;
+    };
+    if key.trim().is_empty() {
+        eprintln!("skip: OPENAI_API_KEY empty");
+        return;
+    }
+    let model = std::env::var("CSVIEW_TEST_MODEL").unwrap_or_else(|_| "gpt-5.4".into());
+    let client = LlmClient::new(Provider::OpenAI, key, model);
+    run_chart_round(
+        client,
+        "openai",
+        "show me a bar chart of average salary by department",
+        ChartKind::Bar,
+        6, // 6 distinct departments in samples/employees.csv
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn google_makes_a_bar_chart() {
+    load_env();
+    let Ok(key) = std::env::var("GEMINI_API_KEY") else {
+        eprintln!("skip: GEMINI_API_KEY not set");
+        return;
+    };
+    if key.trim().is_empty() {
+        eprintln!("skip: GEMINI_API_KEY empty");
+        return;
+    }
+    let client = LlmClient::new(Provider::Google, key, "gemini-2.5-flash".into());
+    run_chart_round(
+        client,
+        "google",
+        "show me a bar chart of average salary by department",
+        ChartKind::Bar,
+        6,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn anthropic_makes_a_bar_chart() {
+    load_env();
+    let Ok(key) = std::env::var("ANTHROPIC_API_KEY") else {
+        eprintln!("skip: ANTHROPIC_API_KEY not set");
+        return;
+    };
+    if key.trim().is_empty() {
+        eprintln!("skip: ANTHROPIC_API_KEY empty");
+        return;
+    }
+    let client = LlmClient::new(Provider::Anthropic, key, "claude-haiku-4-5-20251001".into());
+    run_chart_round(
+        client,
+        "anthropic",
+        "show me a bar chart of average salary by department",
+        ChartKind::Bar,
+        6,
+    )
+    .await;
+}
+
+/// Distribution / histogram path — confirms the model picks the right kind
+/// and the deterministic histogram bucketing in chart.rs round-trips.
+#[tokio::test]
+async fn openai_makes_a_histogram() {
+    load_env();
+    let Ok(key) = std::env::var("OPENAI_API_KEY") else {
+        eprintln!("skip: OPENAI_API_KEY not set");
+        return;
+    };
+    if key.trim().is_empty() {
+        return;
+    }
+    let model = std::env::var("CSVIEW_TEST_MODEL").unwrap_or_else(|_| "gpt-5.4".into());
+    let client = LlmClient::new(Provider::OpenAI, key, model);
+    let store = employees_store();
+    let tools = vec![chart_tool()];
+    let system = format!(
+        "You are a helpful data assistant. The user has a CSV open. When they \
+         ask for a visualisation, call the make_chart tool. Schema:\n{}",
+        schema_summary()
+    );
+    let events = vec![ToolEvent::User("show me a histogram of salary with 8 bins".into())];
+    let reply = client
+        .chat_with_tools(&system, &events, &tools, 2048)
+        .await
+        .expect("histogram tool call");
+    let args = match reply {
+        ToolReply::ToolCall { arguments, .. } => arguments,
+        ToolReply::Text(t) => panic!("expected tool call, got: {t}"),
+    };
+    let spec: ChartSpec = serde_json::from_value(args.clone()).expect("decode");
+    eprintln!("histogram spec: {spec:?}");
+    assert_eq!(spec.chart_type, ChartKind::Histogram);
+    let chart = chart::make_chart(&store, spec.clone()).expect("compute");
+    // bin_count defaults to 12 when the model omits it; some bin count
+    // between 5 and 20 is reasonable.
+    assert!(chart.rows.len() >= 5 && chart.rows.len() <= 20);
+    let total: i64 = chart
+        .rows
+        .iter()
+        .map(|r| r["y"].as_i64().unwrap_or(0))
+        .sum();
+    assert_eq!(total, 50, "every salary should land in some bin");
+}

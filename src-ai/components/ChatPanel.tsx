@@ -1,7 +1,13 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { aiApi } from "../lib/api-ai";
-import type { ChatResponse, ChatSession, QueryResult } from "../lib/types-ai";
+import type {
+  ChartData,
+  ChatResponse,
+  ChatSession,
+  QueryResult,
+} from "../lib/types-ai";
 import { SimpleMarkdown } from "./SimpleMarkdown";
+import { ChartView } from "./ChartView";
 
 function errMsg(e: unknown): string {
   if (e instanceof Error) return e.message;
@@ -19,6 +25,8 @@ export interface ChatMessage {
   content: string;
   sql?: string | null;
   queryResult?: QueryResult | null;
+  /** Charts the assistant produced via the make_chart tool, in order. */
+  charts?: ChartData[];
   timestamp: number;
 }
 
@@ -75,6 +83,13 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
       )}
       {msg.queryResult && msg.queryResult.rowCount > 0 && (
         <MiniTable result={msg.queryResult} />
+      )}
+      {msg.charts && msg.charts.length > 0 && (
+        <div className="chat-charts">
+          {msg.charts.map((c, i) => (
+            <ChartView key={i} data={c} />
+          ))}
+        </div>
       )}
     </div>
   );
@@ -156,6 +171,7 @@ export function ChatPanel({ fileId, onProcessing }: ChatPanelProps) {
         content: response.message,
         sql: undefined,
         queryResult: undefined,
+        charts: response.charts,
         timestamp: Date.now(),
       };
       setMessages((prev) => [...prev, assistantMsg]);

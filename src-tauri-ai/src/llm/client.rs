@@ -341,6 +341,347 @@ impl LlmClient {
         Ok(out)
     }
 
+    /// Multi-turn chat with optional tool calling. Returns either a final
+    /// text reply or a tool-call request the caller must execute and feed
+    /// back via `ToolEvent::Result`.
+    ///
+    /// `events` is the full conversation so far. The caller appends new
+    /// events between iterations (user message → assistant tool-call →
+    /// tool result → assistant text). Up to N rounds is the caller's
+    /// responsibility — see `chat_message` in commands_ai for the loop.
+    pub async fn chat_with_tools(
+        &self,
+        system: &str,
+        events: &[ToolEvent],
+        tools: &[ToolDefinition],
+        max_tokens: u32,
+    ) -> Result<ToolReply, LlmError> {
+        match self.provider {
+            Provider::OpenAI => self.chat_with_tools_openai(system, events, tools, max_tokens).await,
+            Provider::Anthropic => {
+                self.chat_with_tools_anthropic(system, events, tools, max_tokens).await
+            }
+            Provider::Google => {
+                self.chat_with_tools_google(system, events, tools, max_tokens).await
+            }
+        }
+    }
+
+    // --- Tool calling: OpenAI Responses --------------------------------------
+
+    async fn chat_with_tools_openai(
+        &self,
+        system: &str,
+        events: &[ToolEvent],
+        tools: &[ToolDefinition],
+        max_tokens: u32,
+    ) -> Result<ToolReply, LlmError> {
+        let input: Vec<serde_json::Value> = events
+            .iter()
+            .map(|e| match e {
+                ToolEvent::User(text) => serde_json::json!({"role": "user", "content": text}),
+                ToolEvent::AssistantText(text) => {
+                    serde_json::json!({"role": "assistant", "content": text})
+                }
+                ToolEvent::AssistantToolCall { call_id, name, arguments } => {
+                    serde_json::json!({
+                        "type": "function_call",
+                        "call_id": call_id,
+                        "name": name,
+                        "arguments": serde_json::to_string(arguments).unwrap_or_default(),
+                    })
+                }
+                ToolEvent::ToolResult { call_id, output } => serde_json::json!({
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": output,
+                }),
+            })
+            .collect();
+        let tool_decls: Vec<serde_json::Value> = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                })
+            })
+            .collect();
+        let body = serde_json::json!({
+            "model": self.model,
+            "instructions": system,
+            "input": input,
+            "tools": tool_decls,
+            "max_output_tokens": max_tokens,
+        });
+        let resp = self
+            .http
+            .post("https://api.openai.com/v1/responses")
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&body)
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(LlmError::Api {
+                status: status.as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            });
+        }
+        let json: serde_json::Value = resp.json().await?;
+        // Walk output[]: the first function_call wins; if none, gather text.
+        if let Some(arr) = json.get("output").and_then(|v| v.as_array()) {
+            for item in arr {
+                if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
+                    let name = item
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let raw = item
+                        .get("arguments")
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("{}");
+                    let arguments: serde_json::Value =
+                        serde_json::from_str(raw).unwrap_or(serde_json::Value::Null);
+                    let call_id = item
+                        .get("call_id")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    return Ok(ToolReply::ToolCall {
+                        call_id,
+                        name,
+                        arguments,
+                    });
+                }
+            }
+        }
+        Ok(ToolReply::Text(extract_openai_responses_text(&json)?))
+    }
+
+    // --- Tool calling: Anthropic --------------------------------------------
+
+    async fn chat_with_tools_anthropic(
+        &self,
+        system: &str,
+        events: &[ToolEvent],
+        tools: &[ToolDefinition],
+        max_tokens: u32,
+    ) -> Result<ToolReply, LlmError> {
+        // Anthropic groups tool_use + tool_result into content blocks of
+        // assistant / user messages respectively. Coalesce consecutive
+        // events of the same direction so the API gets a clean alternation.
+        let mut messages: Vec<serde_json::Value> = Vec::new();
+        for ev in events {
+            match ev {
+                ToolEvent::User(text) => {
+                    messages.push(serde_json::json!({
+                        "role": "user",
+                        "content": [{"type": "text", "text": text}],
+                    }));
+                }
+                ToolEvent::AssistantText(text) => {
+                    messages.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": text}],
+                    }));
+                }
+                ToolEvent::AssistantToolCall { call_id, name, arguments } => {
+                    messages.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": [{
+                            "type": "tool_use",
+                            "id": call_id,
+                            "name": name,
+                            "input": arguments,
+                        }],
+                    }));
+                }
+                ToolEvent::ToolResult { call_id, output } => {
+                    messages.push(serde_json::json!({
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": call_id,
+                            "content": output,
+                        }],
+                    }));
+                }
+            }
+        }
+        let tool_decls: Vec<serde_json::Value> = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.parameters,
+                })
+            })
+            .collect();
+        let body = serde_json::json!({
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "system": system,
+            "messages": messages,
+            "tools": tool_decls,
+        });
+        let resp = self
+            .http
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&body)
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(LlmError::Api {
+                status: status.as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            });
+        }
+        let json: serde_json::Value = resp.json().await?;
+        if let Some(content) = json.get("content").and_then(|c| c.as_array()) {
+            for block in content {
+                if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                    let name = block
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let id = block
+                        .get("id")
+                        .and_then(|i| i.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let arguments = block
+                        .get("input")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    return Ok(ToolReply::ToolCall {
+                        call_id: id,
+                        name,
+                        arguments,
+                    });
+                }
+            }
+        }
+        Ok(ToolReply::Text(extract_anthropic_text(&json)?))
+    }
+
+    // --- Tool calling: Google Gemini ----------------------------------------
+
+    async fn chat_with_tools_google(
+        &self,
+        system: &str,
+        events: &[ToolEvent],
+        tools: &[ToolDefinition],
+        max_tokens: u32,
+    ) -> Result<ToolReply, LlmError> {
+        let contents: Vec<serde_json::Value> = events
+            .iter()
+            .map(|ev| match ev {
+                ToolEvent::User(text) => serde_json::json!({
+                    "role": "user",
+                    "parts": [{"text": text}],
+                }),
+                ToolEvent::AssistantText(text) => serde_json::json!({
+                    "role": "model",
+                    "parts": [{"text": text}],
+                }),
+                ToolEvent::AssistantToolCall { name, arguments, .. } => serde_json::json!({
+                    "role": "model",
+                    "parts": [{
+                        "functionCall": {
+                            "name": name,
+                            "args": arguments,
+                        }
+                    }],
+                }),
+                ToolEvent::ToolResult { call_id, output } => {
+                    // Gemini wants a `functionResponse` part. The response
+                    // payload has to be JSON; if our `output` string isn't
+                    // already JSON, wrap it.
+                    let response_payload: serde_json::Value =
+                        serde_json::from_str(output).unwrap_or_else(|_| {
+                            serde_json::json!({"result": output})
+                        });
+                    // Gemini doesn't track call_id the way OpenAI does; the
+                    // tool name is what links request and response. Fall
+                    // back to call_id as the function name if we lost it.
+                    serde_json::json!({
+                        "role": "user",
+                        "parts": [{
+                            "functionResponse": {
+                                "name": call_id,
+                                "response": response_payload,
+                            }
+                        }],
+                    })
+                }
+            })
+            .collect();
+        let function_decls: Vec<serde_json::Value> = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                })
+            })
+            .collect();
+        let body = serde_json::json!({
+            "systemInstruction": {"parts": [{"text": system}]},
+            "contents": contents,
+            "tools": [{"functionDeclarations": function_decls}],
+            "generationConfig": {"maxOutputTokens": max_tokens},
+        });
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+            self.model, self.api_key
+        );
+        let resp = self.http.post(&url).json(&body).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(LlmError::Api {
+                status: status.as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            });
+        }
+        let json: serde_json::Value = resp.json().await?;
+        if let Some(parts) = json
+            .get("candidates")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("content"))
+            .and_then(|c| c.get("parts"))
+            .and_then(|p| p.as_array())
+        {
+            for part in parts {
+                if let Some(fc) = part.get("functionCall") {
+                    let name = fc
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let arguments = fc.get("args").cloned().unwrap_or(serde_json::Value::Null);
+                    // Gemini doesn't issue call ids — synthesise one from
+                    // the function name so our tool-loop can echo it back.
+                    return Ok(ToolReply::ToolCall {
+                        call_id: name.clone(),
+                        name,
+                        arguments,
+                    });
+                }
+            }
+        }
+        Ok(ToolReply::Text(extract_gemini_text(&json)?))
+    }
+
     /// Multi-turn chat. Returns the assistant's text.
     pub async fn chat(
         &self,
@@ -492,6 +833,53 @@ impl LlmClient {
         let json: serde_json::Value = resp.json().await?;
         extract_gemini_text(&json)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tool-calling types
+// ---------------------------------------------------------------------------
+
+/// Description of a tool the model may call.
+#[derive(Debug, Clone)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    /// JSON Schema for the tool's parameters object.
+    pub parameters: serde_json::Value,
+}
+
+/// Each entry in the tool-loop conversation.
+#[derive(Debug, Clone)]
+pub enum ToolEvent {
+    /// Plain user message.
+    User(String),
+    /// Plain assistant text reply.
+    AssistantText(String),
+    /// Assistant decided to call a tool. The caller must echo this back
+    /// in the next request along with a corresponding `ToolResult`.
+    AssistantToolCall {
+        call_id: String,
+        name: String,
+        arguments: serde_json::Value,
+    },
+    /// The tool's output, fed back to the model so it can compose a final
+    /// answer. `output` is opaque to the caller — typically JSON string.
+    ToolResult {
+        call_id: String,
+        output: String,
+    },
+}
+
+/// One turn of model output. Either final text, or a tool the model
+/// wants the host to execute before continuing.
+#[derive(Debug, Clone)]
+pub enum ToolReply {
+    Text(String),
+    ToolCall {
+        call_id: String,
+        name: String,
+        arguments: serde_json::Value,
+    },
 }
 
 /// A single turn in a conversation.

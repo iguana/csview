@@ -89,19 +89,32 @@ fn available_provider() -> Option<(Provider, String, String)> {
     None
 }
 
-/// Pick the cheapest known model for the provider (Fast tier when available).
+/// Pick the model the integration tests should run against. The choice is
+/// deliberately tier-balanced and widely available — gpt-5-pro and other
+/// reasoning models are gated behind higher-tier OpenAI accounts and burn
+/// hidden-reasoning tokens that make assertions slow + flaky.
+///
+/// Override the per-provider default by setting `CSVIEW_TEST_MODEL` in
+/// `.env`. Otherwise we use:
+///   - OpenAI:    `gpt-5.4` (per user preference until 5.5 ships)
+///   - Anthropic: claude-haiku-4 family
+///   - Google:    gemini-2.5-flash
 fn cheapest_model(provider: Provider) -> String {
-    available_models()
-        .into_iter()
-        .filter(|m| m.provider == provider)
-        .find(|m| m.tier == ModelTier::Fast)
-        .or_else(|| {
-            available_models()
-                .into_iter()
-                .find(|m| m.provider == provider)
-        })
-        .map(|m| m.id)
-        .unwrap_or_default()
+    if let Ok(o) = std::env::var("CSVIEW_TEST_MODEL") {
+        if !o.trim().is_empty() {
+            return o;
+        }
+    }
+    match provider {
+        Provider::OpenAI => "gpt-5.4".to_string(),
+        Provider::Anthropic => available_models()
+            .into_iter()
+            .filter(|m| m.provider == Provider::Anthropic)
+            .find(|m| m.tier == ModelTier::Fast)
+            .map(|m| m.id)
+            .unwrap_or_else(|| "claude-haiku-4-5-20251001".to_string()),
+        Provider::Google => "gemini-2.5-flash".to_string(),
+    }
 }
 
 /// Build a fresh in-memory SqliteStore from the workspace's sample CSV.
@@ -552,9 +565,19 @@ async fn fetch_models_returns_a_usable_catalogue() {
         assert!(!m.id.is_empty(), "fetched model has empty id");
         assert!(!m.name.is_empty(), "fetched model has empty name");
     }
-    // The first entry (highest tier) should round-trip through complete()
-    // so we know the id we just listed actually accepts requests.
-    let first = &models[0];
+    // Probe a Balanced-tier model (not the top reasoning entry) — reasoning
+    // models gate behind premium accounts and burn hidden-reasoning tokens
+    // that make this assertion slow / costly. Balanced is the everyday
+    // workhorse tier that any account with a key can hit.
+    let probe_model = models
+        .iter()
+        .find(|m| {
+            // The fetched MODEL has provider/tier as enum variants in
+            // ModelInfo (not strings); compare via Debug for simplicity.
+            format!("{:?}", m.tier).to_lowercase() == "balanced"
+        })
+        .or_else(|| models.first())
+        .expect("at least one fetched model");
     let probe = LlmClient::new(
         client.provider(),
         std::env::var(match client.provider() {
@@ -563,20 +586,17 @@ async fn fetch_models_returns_a_usable_catalogue() {
             Provider::Google => "GEMINI_API_KEY",
         })
         .unwrap_or_default(),
-        first.id.clone(),
+        probe_model.id.clone(),
     );
-    // Reasoning-tier models burn output tokens on hidden reasoning before
-    // emitting any text, so give the probe enough headroom to actually
-    // produce visible output.
     let reply = probe
         .complete(
             "you are a test",
             "reply with the word OK and nothing else",
-            2048,
+            512,
         )
         .await
         .expect("fetched model should accept a chat request");
-    eprintln!("probe reply from {}: {reply:?}", first.id);
+    eprintln!("probe reply from {}: {reply:?}", probe_model.id);
     assert!(reply.to_uppercase().contains("OK"));
 }
 

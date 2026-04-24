@@ -16,13 +16,16 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use uuid::Uuid;
 
+use csview_engine::chart::{self, ChartData, ChartError, ChartSpec};
 use csview_engine::engine::{ColumnKind, ColumnMeta};
 use csview_engine::quality::{self, IssueType, QualityIssue};
 use csview_engine::sqlite_store::SchemaContext;
 use csview_engine::stats_extended::{self, AnomalyResult, ExtendedColumnStats};
 
 use crate::commands_csv::CommandError;
-use crate::llm::client::{available_models, ChatMessage, LlmClient, Provider};
+use crate::llm::client::{
+    available_models, LlmClient, Provider, ToolDefinition, ToolEvent, ToolReply,
+};
 use crate::llm::types::LlmError;
 use crate::llm::prompts;
 use crate::state::AiAppState;
@@ -167,6 +170,11 @@ pub struct ChatResponse {
     pub session_id: String,
     pub message: String,
     pub role: String,
+    /// Optional chart payload — populated when the model called the
+    /// `make_chart` tool during this turn. Multiple charts in one reply
+    /// would each appear once `make_chart` is called more than once.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub charts: Vec<ChartData>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -740,7 +748,7 @@ pub async fn chat_message(
     let llm = get_llm(&state)?;
 
     // Load conversation history — collect fully before dropping db lock.
-    let history: Vec<ChatMessage> = {
+    let history: Vec<(String, String)> = {
         let db = state.app_db.lock();
         let mut stmt = db
             .prepare(
@@ -755,24 +763,73 @@ pub async fn chat_message(
             .map_err(|e| CommandError::Sqlite(e.to_string()))?
             .filter_map(|r| r.ok())
             .collect();
-        // `stmt` and `db` are dropped here before we create `ChatMessage` values.
         drop(stmt);
         drop(db);
         pairs
-            .into_iter()
-            .map(|(role, content)| ChatMessage { role, content })
-            .collect()
     };
 
-    let mut messages = history;
-    messages.push(ChatMessage::user(message.clone()));
+    let mut events: Vec<ToolEvent> = history
+        .into_iter()
+        .map(|(role, content)| match role.as_str() {
+            "assistant" => ToolEvent::AssistantText(content),
+            _ => ToolEvent::User(content),
+        })
+        .collect();
+    events.push(ToolEvent::User(message.clone()));
 
-    // Call LLM — no lock held.
+    let tools = vec![chart_tool_definition()];
     let system = prompts::chat_system_prompt(&schema);
-    let reply = llm
-        .chat(&system, &messages, 1024)
-        .await
-        .map_err(llm_error_to_command_error)?;
+
+    // Tool-use loop. Each round either completes with text (return to user)
+    // or emits a tool call we execute locally and feed back. Cap rounds to
+    // prevent runaway costs if the model gets stuck.
+    let mut charts: Vec<ChartData> = Vec::new();
+    let mut final_text = String::new();
+    for round in 0..4 {
+        let reply = llm
+            .chat_with_tools(&system, &events, &tools, 2048)
+            .await
+            .map_err(llm_error_to_command_error)?;
+        match reply {
+            ToolReply::Text(text) => {
+                final_text = text;
+                break;
+            }
+            ToolReply::ToolCall { call_id, name, arguments } => {
+                if name != "make_chart" {
+                    final_text = format!("(model requested unknown tool `{name}`)");
+                    break;
+                }
+                let spec: ChartSpec = serde_json::from_value(arguments.clone())
+                    .map_err(|e| CommandError::InvalidArg(format!("bad chart spec: {e}")))?;
+                events.push(ToolEvent::AssistantToolCall {
+                    call_id: call_id.clone(),
+                    name: name.clone(),
+                    arguments,
+                });
+                // Execute the tool locally — no LLM-generated values reach
+                // the rendered chart, only the choice of columns and shape.
+                let tool_output = match run_make_chart(&state, &file_id, spec) {
+                    Ok(data) => {
+                        let summary = chart_summary_for_llm(&data);
+                        charts.push(data);
+                        summary
+                    }
+                    Err(e) => format!("{{\"error\": {:?}}}", e.to_string()),
+                };
+                events.push(ToolEvent::ToolResult {
+                    call_id,
+                    output: tool_output,
+                });
+                if round == 3 {
+                    final_text = "(reached max chart-tool iterations)".to_string();
+                }
+            }
+        }
+    }
+    if final_text.is_empty() {
+        final_text = "(no response)".into();
+    }
 
     // Persist both turns.
     {
@@ -784,7 +841,7 @@ pub async fn chat_message(
         .map_err(|e| CommandError::Sqlite(e.to_string()))?;
         db.execute(
             "INSERT INTO chat_messages (session_id, role, content) VALUES (?1, 'assistant', ?2)",
-            rusqlite::params![session_id, reply.clone()],
+            rusqlite::params![session_id, final_text.clone()],
         )
         .map_err(|e| CommandError::Sqlite(e.to_string()))?;
         db.execute(
@@ -794,7 +851,99 @@ pub async fn chat_message(
         .map_err(|e| CommandError::Sqlite(e.to_string()))?;
     }
 
-    Ok(ChatResponse { session_id, message: reply, role: "assistant".to_string() })
+    Ok(ChatResponse {
+        session_id,
+        message: final_text,
+        role: "assistant".to_string(),
+        charts,
+    })
+}
+
+/// Direct invocation of the chart tool, exposed so the frontend can also
+/// build charts outside of a chat context (future "chart from selection"
+/// gesture, etc).
+#[tauri::command]
+pub fn make_chart(
+    state: State<'_, AiAppState>,
+    file_id: String,
+    spec: ChartSpec,
+) -> Result<ChartData, CommandError> {
+    run_make_chart(&state, &file_id, spec)
+}
+
+fn run_make_chart(
+    state: &AiAppState,
+    file_id: &str,
+    spec: ChartSpec,
+) -> Result<ChartData, CommandError> {
+    let stores = state.stores.lock();
+    let store = stores
+        .get(file_id)
+        .ok_or_else(|| CommandError::UnknownFile(file_id.to_string()))?;
+    chart::make_chart(store, spec).map_err(|e| match e {
+        ChartError::Sql(s) => CommandError::Sqlite(s.to_string()),
+        ChartError::UnknownColumn(c) => {
+            CommandError::InvalidArg(format!("unknown column: {c}"))
+        }
+        ChartError::Invalid(m) => CommandError::InvalidArg(m),
+    })
+}
+
+/// Compact JSON summary the LLM sees. The full payload (including data
+/// rows) is shipped to the frontend separately — feeding all rows back
+/// through the LLM would burn tokens and tempt hallucination.
+fn chart_summary_for_llm(data: &ChartData) -> String {
+    serde_json::json!({
+        "rendered": true,
+        "kind": data.spec.chart_type,
+        "title": data.spec.title,
+        "x_label": data.x_label,
+        "y_label": data.y_label,
+        "row_count": data.rows.len(),
+        "series": data.series,
+    })
+    .to_string()
+}
+
+/// JSON-Schema for the chart tool. Kept in lockstep with `ChartSpec`.
+fn chart_tool_definition() -> ToolDefinition {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "chartType": {
+                "type": "string",
+                "enum": [
+                    "bar", "horizontal_bar", "stacked_bar", "grouped_bar",
+                    "line", "area", "pie", "donut", "scatter", "histogram",
+                    "treemap"
+                ],
+                "description": "Visual style. Use bar/pie for categorical; line/area for ordered/time-series; scatter for x↔y; histogram for the distribution of a single numeric column; stacked_bar/grouped_bar require a `groupBy` column for the second dimension."
+            },
+            "title": {"type": "string"},
+            "xColumn": {"type": "string", "description": "Existing column name for the x-axis (or category for pie/donut/treemap, or source column for histogram)."},
+            "yColumn": {"type": "string", "description": "Existing column name for the y-axis. Required unless aggregation = count."},
+            "aggregation": {
+                "type": "string",
+                "enum": ["count", "sum", "avg", "min", "max"],
+                "description": "Aggregate y over each x bucket. 'count' counts rows and ignores yColumn."
+            },
+            "groupBy": {"type": "string", "description": "Optional second column for stacked_bar / grouped_bar / multi-series line / multi-series area."},
+            "limit": {"type": "integer", "description": "Cap the number of rows after sorting."},
+            "order": {"type": "string", "enum": ["asc", "desc"], "description": "Sort by y value."},
+            "binCount": {"type": "integer", "description": "For histogram only — number of equal-width buckets. Defaults to 12."}
+        },
+        "required": ["chartType", "title", "xColumn"]
+    });
+    ToolDefinition {
+        name: "make_chart".to_string(),
+        description:
+            "Render a chart from the open CSV. The system runs the SQL and \
+             draws the chart — DO NOT invent values, only choose the chart \
+             type and which columns to use. Always prefer this tool over \
+             describing the chart in text."
+                .to_string(),
+        parameters: schema,
+    }
 }
 
 // ---------------------------------------------------------------------------

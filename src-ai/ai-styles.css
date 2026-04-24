@@ -1454,6 +1454,93 @@
   gap: 10px;
 }
 
+/* --- Chart cards (rendered inline in chat replies) --- */
+.chat-charts {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+.chart-card {
+  background: color-mix(in srgb, var(--bg-elevated) 96%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px 10px;
+}
+.chart-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.chart-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+.chart-axes {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.chart-axis-label {
+  padding: 1px 6px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-radius: 4px;
+  color: var(--text-muted);
+}
+.chart-axis-sep {
+  color: var(--text-dim);
+}
+.chart-body {
+  width: 100%;
+}
+.chart-sql {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.chart-sql summary {
+  cursor: pointer;
+  user-select: none;
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-weight: 500;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  font-size: 10px;
+  color: var(--text-dim);
+  display: inline-block;
+}
+.chart-sql summary:hover {
+  background: var(--bg-row-hover);
+  color: var(--text-muted);
+}
+.chart-sql pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  background: var(--bg-grid);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: ui-monospace, "SF Mono", monospace;
+  font-size: 11px;
+  overflow-x: auto;
+  color: var(--text-muted);
+}
+.chart-fallback {
+  padding: 14px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-style: italic;
+}
+
 .model-refresh-btn {
   font-size: 11px;
   padding: 4px 10px;

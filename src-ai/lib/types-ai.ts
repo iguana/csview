@@ -33,6 +33,41 @@ export interface SchemaContext {
   sampleRows: string[][];
 }
 
+// Returned by chat_message when the model called the `make_chart` tool.
+export type ChartKind =
+  | "bar"
+  | "horizontal_bar"
+  | "stacked_bar"
+  | "grouped_bar"
+  | "line"
+  | "area"
+  | "pie"
+  | "donut"
+  | "scatter"
+  | "histogram"
+  | "treemap";
+
+export interface ChartSpec {
+  chartType: ChartKind;
+  title: string;
+  xColumn: string;
+  yColumn?: string;
+  aggregation?: "count" | "sum" | "avg" | "min" | "max";
+  groupBy?: string;
+  limit?: number;
+  order?: "asc" | "desc";
+  binCount?: number;
+}
+
+export interface ChartData {
+  spec: ChartSpec;
+  sql: string;
+  rows: Record<string, unknown>[];
+  series: string[];
+  xLabel: string;
+  yLabel: string;
+}
+
 export interface QueryResult {
   columns: string[];
   rows: (string | number | boolean | null)[][];
@@ -134,6 +169,8 @@ export interface ChatResponse {
   sessionId: string;
   message: string;
   role: string;
+  /** Charts the model produced via the make_chart tool during this turn. */
+  charts?: ChartData[];
 }
 
 // --- Feature 8: Report ---
