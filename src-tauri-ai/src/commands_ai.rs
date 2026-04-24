@@ -937,10 +937,15 @@ fn chart_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "make_chart".to_string(),
         description:
-            "Render a chart from the open CSV. The system runs the SQL and \
-             draws the chart — DO NOT invent values, only choose the chart \
-             type and which columns to use. Always prefer this tool over \
-             describing the chart in text."
+            "Render a chart from the CSV currently open in this application. \
+             You MUST call this tool whenever the user asks for a chart, \
+             plot, graph, visualisation, distribution, breakdown, or 'show \
+             me'. Do NOT write Python, matplotlib, plotly, vega, or any \
+             other charting code in your reply — the app cannot execute it. \
+             Only this tool produces a chart visible to the user. \
+             You decide the chart_type and which columns to use; the system \
+             runs the SQL and draws the chart, so do not invent any values. \
+             After the tool returns, write a brief one-sentence interpretation."
                 .to_string(),
         parameters: schema,
     }

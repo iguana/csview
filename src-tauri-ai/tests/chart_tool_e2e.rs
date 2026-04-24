@@ -20,6 +20,7 @@ use csview_engine::chart::{self, ChartKind, ChartSpec};
 use csview_engine::engine::{ColumnKind, ColumnMeta};
 use csview_engine::sqlite_store::SqliteStore;
 use csviewai_lib::llm::client::{LlmClient, Provider, ToolDefinition, ToolEvent, ToolReply};
+use csviewai_lib::llm::prompts;
 
 use std::path::PathBuf;
 use std::sync::Once;
@@ -261,6 +262,114 @@ async fn anthropic_makes_a_bar_chart() {
         "show me a bar chart of average salary by department",
         ChartKind::Bar,
         6,
+    )
+    .await;
+}
+
+/// **Regression test for the "make me a chart" prompt** — exercises the
+/// EXACT production system prompt + tool description, not a custom one
+/// tailored to the test. A previous shipping bug was that the production
+/// chat_system_prompt told the model "wrap SQL in a code block" but
+/// never mentioned `make_chart`, so the model wrote Python matplotlib
+/// instead of calling the tool. This test would have caught that.
+///
+/// The prompt is deliberately conversational ("make me a chart of …")
+/// rather than instructive ("call the make_chart tool with …") so the
+/// model has to be nudged toward tool use by the prompt + tool
+/// description alone.
+async fn run_production_prompt_round(client: LlmClient, label: &str, user_prompt: &str) {
+    let store = employees_store();
+    let schema_ctx = store
+        .schema_context(5)
+        .expect("schema_context for sample store");
+    // Use the SAME prompt the production chat_message uses — the chart
+    // bug was a divergence between this and the in-test custom prompt.
+    let system = prompts::chat_system_prompt(&schema_ctx);
+    let tools = vec![chart_tool()];
+
+    let events = vec![ToolEvent::User(user_prompt.into())];
+    let reply = client
+        .chat_with_tools(&system, &events, &tools, 2048)
+        .await
+        .unwrap_or_else(|e| panic!("[{label}] tool-call request failed: {e:?}"));
+
+    match reply {
+        ToolReply::ToolCall { name, arguments, .. } => {
+            assert_eq!(name, "make_chart", "[{label}] wrong tool name");
+            let spec: ChartSpec = serde_json::from_value(arguments.clone()).unwrap_or_else(|e| {
+                panic!("[{label}] could not decode ChartSpec: {e}\nargs={arguments}")
+            });
+            let chart = chart::make_chart(&store, spec).expect("chart computation");
+            assert!(!chart.rows.is_empty(), "[{label}] chart had no rows");
+            eprintln!(
+                "[{label}] ✓ tool fired ({} rows, kind={:?})",
+                chart.rows.len(),
+                chart.spec.chart_type
+            );
+        }
+        ToolReply::Text(t) => {
+            // Detect the previously-shipped failure mode: model writes
+            // matplotlib / pandas / plotly instead of using the tool.
+            let lower = t.to_lowercase();
+            let code_smells = [
+                "import matplotlib",
+                "import plotly",
+                "import seaborn",
+                "df.plot(",
+                "plt.bar",
+                "plt.pie",
+                "plt.show",
+                "```python",
+            ];
+            let smell = code_smells
+                .iter()
+                .find(|s| lower.contains(*s))
+                .copied()
+                .unwrap_or("");
+            panic!(
+                "[{label}] expected a make_chart tool call, got plain text instead.\n\
+                 Suspicious code-smell: {smell:?}\n\
+                 Reply was:\n{t}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn openai_uses_tool_with_production_prompt() {
+    load_env();
+    let Ok(key) = std::env::var("OPENAI_API_KEY") else {
+        eprintln!("skip: OPENAI_API_KEY not set");
+        return;
+    };
+    if key.trim().is_empty() {
+        return;
+    }
+    let model = std::env::var("CSVIEW_TEST_MODEL").unwrap_or_else(|_| "gpt-5.4".into());
+    let client = LlmClient::new(Provider::OpenAI, key, model);
+    run_production_prompt_round(
+        client,
+        "openai-prod-prompt",
+        "make me a chart showing how salaries are distributed across departments",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn google_uses_tool_with_production_prompt() {
+    load_env();
+    let Ok(key) = std::env::var("GEMINI_API_KEY") else {
+        eprintln!("skip: GEMINI_API_KEY not set");
+        return;
+    };
+    if key.trim().is_empty() {
+        return;
+    }
+    let client = LlmClient::new(Provider::Google, key, "gemini-2.5-flash".into());
+    run_production_prompt_round(
+        client,
+        "google-prod-prompt",
+        "make me a chart showing how salaries are distributed across departments",
     )
     .await;
 }

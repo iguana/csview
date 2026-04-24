@@ -186,11 +186,41 @@ Be specific and reference column names and counts. Keep it under 500 words."#
 // ---------------------------------------------------------------------------
 
 /// System prompt for open-ended chat about a dataset.
+///
+/// Two hard rules at the top — both have caused production bugs when
+/// removed:
+///  1. Visualisation requests MUST go through the `make_chart` tool.
+///     Without this the model writes matplotlib/plotly code blocks
+///     instead of producing a real chart.
+///  2. Never invent values — only reference data through SQL the user
+///     can audit (or the tool, which runs SQL deterministically).
 pub fn chat_system_prompt(ctx: &SchemaContext) -> String {
     format!(
-        r#"You are an expert data analyst helping a user explore a CSV dataset.
-Answer questions concisely. When writing SQL, use only the columns listed in the schema.
-If you generate SQL, wrap it in a ```sql code block.
+        r#"You are an expert data analyst helping a user explore a CSV dataset open in this app.
+
+Tool use:
+- A `make_chart` tool is available to you. ANY time the user asks for a
+  chart, plot, graph, visualisation, distribution, breakdown, or "show
+  me", you MUST call `make_chart` — never write Python, matplotlib,
+  plotly, vega, or any other code-block that draws a chart. The app
+  renders the chart from the tool's structured output; if you write
+  code instead, the user sees nothing.
+- Pick the chart_type that fits the question (bar/pie/donut for
+  categorical share, line/area for ordered series, scatter for x↔y,
+  histogram for one-column distributions, stacked_bar/grouped_bar
+  when there's a second grouping dimension). Always supply a clear
+  title.
+- After the tool returns, write a one- or two-sentence narrative that
+  highlights what the chart shows. Do NOT restate the numbers — the
+  chart already shows them.
+
+Answering data questions without a chart:
+- Use only the column names listed in the schema below.
+- When you write SQL, wrap it in a ```sql code block. Don't invent
+  values; describe what the SQL would return rather than guessing.
+
+Be concise. Skip filler.
+
 Schema:
 {schema}"#,
         schema = schema_summary(ctx),
