@@ -374,6 +374,149 @@ async fn google_uses_tool_with_production_prompt() {
     .await;
 }
 
+/// **Regression test for the "(reached max chart-tool iterations)" bug.**
+///
+/// The production chat_message loops until the model returns text. If the
+/// model just keeps emitting tool calls (or, worse, never gets enough
+/// tokens to compose a reply after burning some on hidden reasoning), the
+/// loop hits its cap and the user sees a meaningless `(reached max…)`
+/// fallback string instead of either a chart description or a chart.
+///
+/// This test mirrors the production loop:
+///   1. call chat_with_tools with the chart tool
+///   2. on ToolCall: execute make_chart, push events, continue
+///   3. on Text: stop and assert non-empty
+///   4. if cap is hit with charts produced: do one final tools-disabled
+///      call to coerce a narrative — this MUST return non-empty text
+async fn run_full_chat_loop(client: LlmClient, label: &str, user_prompt: &str) {
+    use csviewai_lib::llm::client::ToolDefinition as TD;
+    let store = employees_store();
+    let schema_ctx = store.schema_context(5).expect("schema");
+    let system = prompts::chat_system_prompt(&schema_ctx);
+    let tools: Vec<TD> = vec![chart_tool()];
+    let mut events: Vec<ToolEvent> = vec![ToolEvent::User(user_prompt.into())];
+
+    const MAX_ROUNDS: usize = 5;
+    let mut charts_made = 0usize;
+    let mut final_text = String::new();
+
+    for round in 0..MAX_ROUNDS {
+        let reply = client
+            .chat_with_tools(&system, &events, &tools, 4096)
+            .await
+            .unwrap_or_else(|e| panic!("[{label}] round {round}: {e:?}"));
+        match reply {
+            ToolReply::Text(t) => {
+                final_text = t;
+                break;
+            }
+            ToolReply::ToolCall {
+                call_id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(name, "make_chart", "[{label}] unknown tool");
+                let spec: ChartSpec =
+                    serde_json::from_value(arguments.clone()).expect("decode chart spec");
+                eprintln!(
+                    "[{label}] round {round}: tool call kind={:?} x={}",
+                    spec.chart_type, spec.x_column
+                );
+                let chart = chart::make_chart(&store, spec.clone())
+                    .unwrap_or_else(|e| panic!("[{label}] make_chart failed: {e:?}"));
+                charts_made += 1;
+                let summary = serde_json::json!({
+                    "rendered": true,
+                    "kind": chart.spec.chart_type,
+                    "title": chart.spec.title,
+                    "row_count": chart.rows.len(),
+                });
+                events.push(ToolEvent::AssistantToolCall {
+                    call_id: call_id.clone(),
+                    name,
+                    arguments,
+                });
+                events.push(ToolEvent::ToolResult {
+                    call_id,
+                    output: summary.to_string(),
+                });
+            }
+        }
+    }
+
+    // Mirror the production fallback: if the loop never produced text but
+    // did produce charts, force one tools-disabled narrative call.
+    if final_text.is_empty() && charts_made > 0 {
+        eprintln!("[{label}] cap hit with {charts_made} chart(s); forcing narrative call");
+        let extra_system = format!(
+            "{system}\n\nThe chart(s) the user requested have already been \
+             rendered. Do NOT call any more tools. Reply with a brief one or \
+             two sentence interpretation."
+        );
+        let reply = client
+            .chat_with_tools(&extra_system, &events, &[], 2048)
+            .await
+            .unwrap_or_else(|e| panic!("[{label}] narrative call: {e:?}"));
+        match reply {
+            ToolReply::Text(t) => final_text = t,
+            ToolReply::ToolCall { name, .. } => {
+                panic!("[{label}] narrative-only call still tried to call {name}")
+            }
+        }
+    }
+
+    assert!(charts_made >= 1, "[{label}] no charts were rendered");
+    assert!(
+        !final_text.trim().is_empty(),
+        "[{label}] loop completed but produced no narrative text — \
+         this is the (reached max chart-tool iterations) bug"
+    );
+    eprintln!(
+        "[{label}] ✓ {} chart(s) + narrative ({} chars)",
+        charts_made,
+        final_text.len()
+    );
+}
+
+#[tokio::test]
+async fn openai_full_chat_loop_yields_charts_plus_narrative() {
+    load_env();
+    let Ok(key) = std::env::var("OPENAI_API_KEY") else {
+        eprintln!("skip: OPENAI_API_KEY not set");
+        return;
+    };
+    if key.trim().is_empty() {
+        return;
+    }
+    let model = std::env::var("CSVIEW_TEST_MODEL").unwrap_or_else(|_| "gpt-5.4".into());
+    let client = LlmClient::new(Provider::OpenAI, key, model);
+    run_full_chat_loop(
+        client,
+        "openai-loop",
+        "make me a chart of average salary by department",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn google_full_chat_loop_yields_charts_plus_narrative() {
+    load_env();
+    let Ok(key) = std::env::var("GEMINI_API_KEY") else {
+        eprintln!("skip: GEMINI_API_KEY not set");
+        return;
+    };
+    if key.trim().is_empty() {
+        return;
+    }
+    let client = LlmClient::new(Provider::Google, key, "gemini-2.5-flash".into());
+    run_full_chat_loop(
+        client,
+        "google-loop",
+        "make me a chart of average salary by department",
+    )
+    .await;
+}
+
 /// Distribution / histogram path — confirms the model picks the right kind
 /// and the deterministic histogram bucketing in chart.rs round-trips.
 #[tokio::test]

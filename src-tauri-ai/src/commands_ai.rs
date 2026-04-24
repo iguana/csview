@@ -783,11 +783,21 @@ pub async fn chat_message(
     // Tool-use loop. Each round either completes with text (return to user)
     // or emits a tool call we execute locally and feed back. Cap rounds to
     // prevent runaway costs if the model gets stuck.
+    //
+    // Token budget needs to be generous: reasoning models (gpt-5.x, o-series)
+    // burn tokens on hidden reasoning before producing any visible text,
+    // and 2048 was tight enough that chats sometimes exhausted budget mid
+    // narrative.
+    const TOOL_LOOP_TOKENS: u32 = 4096;
+    const FINAL_NARRATIVE_TOKENS: u32 = 2048;
+    const MAX_ROUNDS: usize = 5;
+
     let mut charts: Vec<ChartData> = Vec::new();
     let mut final_text = String::new();
-    for round in 0..4 {
+    let mut hit_cap = false;
+    for round in 0..MAX_ROUNDS {
         let reply = llm
-            .chat_with_tools(&system, &events, &tools, 2048)
+            .chat_with_tools(&system, &events, &tools, TOOL_LOOP_TOKENS)
             .await
             .map_err(llm_error_to_command_error)?;
         match reply {
@@ -802,6 +812,11 @@ pub async fn chat_message(
                 }
                 let spec: ChartSpec = serde_json::from_value(arguments.clone())
                     .map_err(|e| CommandError::InvalidArg(format!("bad chart spec: {e}")))?;
+                eprintln!(
+                    "[chat] round {round}: tool call make_chart \
+                     kind={:?} x={} y={:?} agg={:?}",
+                    spec.chart_type, spec.x_column, spec.y_column, spec.aggregation
+                );
                 events.push(ToolEvent::AssistantToolCall {
                     call_id: call_id.clone(),
                     name: name.clone(),
@@ -811,19 +826,74 @@ pub async fn chat_message(
                 // the rendered chart, only the choice of columns and shape.
                 let tool_output = match run_make_chart(&state, &file_id, spec) {
                     Ok(data) => {
+                        eprintln!(
+                            "[chat] round {round}: chart rendered ({} rows)",
+                            data.rows.len()
+                        );
                         let summary = chart_summary_for_llm(&data);
                         charts.push(data);
                         summary
                     }
-                    Err(e) => format!("{{\"error\": {:?}}}", e.to_string()),
+                    Err(e) => {
+                        eprintln!("[chat] round {round}: chart error: {e}");
+                        format!("{{\"error\": {:?}}}", e.to_string())
+                    }
                 };
                 events.push(ToolEvent::ToolResult {
                     call_id,
                     output: tool_output,
                 });
-                if round == 3 {
-                    final_text = "(reached max chart-tool iterations)".to_string();
+                if round + 1 == MAX_ROUNDS {
+                    hit_cap = true;
                 }
+            }
+        }
+    }
+
+    // If we exited the loop with charts in hand but no narrative text,
+    // do one final tools-disabled call to force the model to actually
+    // describe what it just rendered. The cap prompt explicitly says
+    // "no more tools" so the model can't bounce off into another round.
+    if final_text.is_empty() && !charts.is_empty() {
+        eprintln!(
+            "[chat] forcing narrative-only call after {} chart(s){}",
+            charts.len(),
+            if hit_cap { " (hit iteration cap)" } else { "" }
+        );
+        let narrative_events = events.clone();
+        match llm
+            .chat_with_tools(
+                &format!(
+                    "{system}\n\n\
+                     The chart(s) the user requested have already been \
+                     rendered for them via the make_chart tool. Do NOT \
+                     call any more tools. Reply with a brief one or two \
+                     sentence interpretation of what the chart(s) show.",
+                ),
+                &narrative_events,
+                &[],
+                FINAL_NARRATIVE_TOKENS,
+            )
+            .await
+        {
+            Ok(ToolReply::Text(t)) => final_text = t,
+            Ok(ToolReply::ToolCall { name, .. }) => {
+                eprintln!(
+                    "[chat] narrative-only call returned a tool call ({name}); ignoring"
+                );
+                final_text = format!(
+                    "Rendered {} chart{}.",
+                    charts.len(),
+                    if charts.len() == 1 { "" } else { "s" }
+                );
+            }
+            Err(e) => {
+                eprintln!("[chat] narrative-only call failed: {e}");
+                final_text = format!(
+                    "Rendered {} chart{}.",
+                    charts.len(),
+                    if charts.len() == 1 { "" } else { "s" }
+                );
             }
         }
     }
