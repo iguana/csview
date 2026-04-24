@@ -48,6 +48,7 @@ pub fn run() {
             commands_csv::update_cell,
             commands_csv::insert_row,
             commands_csv::delete_rows,
+            commands_csv::delete_column,
             commands_csv::save_csv,
             commands_csv::save_csv_as,
             commands_csv::get_schema,
@@ -96,19 +97,41 @@ pub fn run() {
             db::migrations::run_migrations(&conn)
                 .expect("could not run database migrations");
 
-            // Restore API key if one was previously saved.
-            let stored_key: Option<String> = conn
+            // Load .env file if present (for dev convenience).
+            if let Ok(contents) = std::fs::read_to_string(".env") {
+                for line in contents.lines() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') { continue; }
+                    if let Some((k, v)) = line.split_once('=') {
+                        std::env::set_var(k.trim(), v.trim());
+                    }
+                }
+            }
+
+            // Restore saved API key from DB, or auto-detect from env vars.
+            let stored: Option<(String, String)> = conn
                 .query_row(
-                    "SELECT api_key FROM account ORDER BY id DESC LIMIT 1",
+                    "SELECT api_key, model FROM account ORDER BY id DESC LIMIT 1",
                     [],
-                    |row| row.get(0),
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                 )
                 .ok();
 
             let state = AiAppState::new(conn);
 
-            if let Some(key) = stored_key {
-                *state.llm.lock() = Some(crate::llm::LlmClient::new(key));
+            if let Some((compound_key, model)) = stored {
+                // compound_key = "provider:actual_key"
+                if let Some((prov_str, actual_key)) = compound_key.split_once(':') {
+                    let provider = match prov_str {
+                        "openai" => crate::llm::client::Provider::OpenAI,
+                        "google" => crate::llm::client::Provider::Google,
+                        _ => crate::llm::client::Provider::Anthropic,
+                    };
+                    *state.llm.lock() = Some(crate::llm::LlmClient::new(provider, actual_key.to_string(), model));
+                }
+            } else {
+                // No saved key — try env vars
+                crate::commands_ai::auto_detect_keys(&state);
             }
 
             app.manage(state);

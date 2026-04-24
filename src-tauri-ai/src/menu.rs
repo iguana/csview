@@ -86,8 +86,23 @@ pub fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
                 .build(app)?,
         )
         .item(
-            &MenuItemBuilder::with_id("menu.delete_row", "Delete Row")
+            &MenuItemBuilder::with_id("menu.delete_row", "Delete Row…")
                 .accelerator("CmdOrCtrl+Backspace")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("menu.delete_column", "Delete Column…")
+                .accelerator("CmdOrCtrl+Shift+Backspace")
+                .build(app)?,
+        )
+        .separator()
+        .item(
+            &MenuItemBuilder::with_id("menu.autosize_column", "Auto-Size Column")
+                .accelerator("CmdOrCtrl+Alt+0")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("menu.autosize_all_columns", "Auto-Size All Columns")
                 .build(app)?,
         )
         .separator()
@@ -135,6 +150,37 @@ pub fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
                 .build(app)?,
         )
         .item(&MenuItemBuilder::with_id("menu.toggle_header", "Toggle Header Row").build(app)?)
+        .separator()
+        .item(
+            &MenuItemBuilder::with_id("menu.freeze_rows_to_cursor", "Freeze Rows to Cursor")
+                .accelerator("CmdOrCtrl+Alt+R")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id(
+                "menu.freeze_columns_to_cursor",
+                "Freeze Columns to Cursor",
+            )
+            .accelerator("CmdOrCtrl+Alt+F")
+            .build(app)?,
+        )
+        .item(&MenuItemBuilder::with_id("menu.unfreeze_all", "Unfreeze All").build(app)?)
+        .separator()
+        .item(
+            &MenuItemBuilder::with_id("menu.hide_row", "Hide Row")
+                .accelerator("CmdOrCtrl+Alt+H")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("menu.hide_column", "Hide Column")
+                .accelerator("CmdOrCtrl+Shift+0")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("menu.show_all_hidden", "Show All Hidden")
+                .accelerator("CmdOrCtrl+Shift+H")
+                .build(app)?,
+        )
         .separator()
         .item(&row_height_submenu)
         .separator()

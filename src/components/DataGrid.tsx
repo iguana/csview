@@ -22,6 +22,33 @@ export interface DataGridHandle {
   beginEdit: (initial?: string) => void;
   /** Focus the grid so it starts receiving keyboard events. */
   focus: () => void;
+  /** Auto-size a single column to fit the widest visible cell. */
+  autoSizeColumn: (columnIndex: number) => void;
+  /** Auto-size every visible column. */
+  autoSizeAllColumns: () => void;
+  /** Freeze the first N visible rows (clamped). */
+  setFrozenRows: (n: number) => void;
+  /** Freeze the first N visible columns (clamped). */
+  setFrozenColumns: (n: number) => void;
+  /** Clear both row and column freezes. */
+  unfreezeAll: () => void;
+  /** Hide a column by its data index. */
+  hideColumn: (columnIndex: number) => void;
+  /** Hide a row by its data index. */
+  hideRow: (rowIndex: number) => void;
+  /** Show every hidden row and column. */
+  showAllHidden: () => void;
+  /** Open the delete-row confirmation modal for the given rows. */
+  requestDeleteRows: (rows: number[]) => void;
+  /** Open the delete-column confirmation modal. */
+  requestDeleteColumn: (columnIndex: number) => void;
+  /** Read current display state — used by status bar / menu enablement. */
+  getDisplayState: () => {
+    frozenRows: number;
+    frozenColumns: number;
+    hiddenRowCount: number;
+    hiddenColumnCount: number;
+  };
 }
 
 export interface DataGridProps {
@@ -43,16 +70,48 @@ export interface DataGridProps {
   onCopy: (cells: CellCoord[]) => void;
   onCut: (cells: CellCoord[]) => void;
   onPaste: () => void;
+  /** Actually delete rows. The grid confirms first; caller just performs. */
   onDeleteRows: (rows: number[]) => void;
+  /** Optional: actually delete a column. If omitted, "Delete Column…" is hidden. */
+  onDeleteColumn?: (columnIndex: number) => void;
   rowHeight: number;
   jumpToRow: number | null;
+  /** Optional: report display-state changes upward (for status bar / menus). */
+  onDisplayStateChange?: (state: {
+    frozenRows: number;
+    frozenColumns: number;
+    hiddenRowCount: number;
+    hiddenColumnCount: number;
+  }) => void;
 }
 
 const DEFAULT_COL_WIDTH = 160;
 const ROW_INDEX_WIDTH = 60;
 const HEADER_HEIGHT = 34;
+const MIN_COL_WIDTH = 60;
+const MAX_AUTOSIZE_WIDTH = 800;
+/** Per-side cell horizontal padding (matches `.grid-cell { padding: 0 10px }` in CSS). */
+const CELL_HPADDING = 10;
+/** Header content overhead: kind badge + sort badge + flex gaps + padding. */
+const HEADER_CONTENT_OVERHEAD = 80;
 
 const numericKinds = new Set(["integer", "float"]);
+
+interface ContextMenuState {
+  x: number;
+  y: number;
+  kind: "header" | "rowindex";
+  /** For "header": column data index. For "rowindex": display-row index in the visible-row mapping. */
+  index: number;
+}
+
+interface ConfirmState {
+  message: string;
+  detail?: string;
+  confirmLabel: string;
+  destructive?: boolean;
+  onConfirm: () => void;
+}
 
 export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
   function DataGrid(props, ref) {
@@ -74,13 +133,16 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       onCut,
       onPaste,
       onDeleteRows,
+      onDeleteColumn,
       rowHeight,
       jumpToRow,
+      onDisplayStateChange,
     } = props;
 
     const scrollRef = useRef<HTMLDivElement>(null);
     const innerRef = useRef<HTMLDivElement>(null);
     const editInputRef = useRef<HTMLInputElement>(null);
+    const measureCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
     const [columnWidths, setColumnWidths] = useState<Record<number, number>>({});
     const [resizing, setResizing] = useState<number | null>(null);
@@ -88,22 +150,104 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     const [editingCell, setEditingCell] = useState<CellCoord | null>(null);
     const [editValue, setEditValue] = useState("");
 
+    // --- Display-state: freeze + hide ---
+    const [frozenRows, setFrozenRowsState] = useState(0);
+    const [frozenColumns, setFrozenColumnsState] = useState(0);
+    const [hiddenRows, setHiddenRows] = useState<Set<number>>(() => new Set());
+    const [hiddenColumns, setHiddenColumns] = useState<Set<number>>(() => new Set());
+
+    const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+    const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+
+    // Reset everything that's column-shaped when the column list changes.
     useEffect(() => {
       setColumnWidths({});
+      setFrozenColumnsState(0);
+      setHiddenColumns(new Set());
     }, [columns.length]);
+
+    // Reset row-shaped state when row count changes meaningfully.
+    useEffect(() => {
+      setHiddenRows((prev) => {
+        if (prev.size === 0) return prev;
+        // Drop hidden indices past the new row count.
+        const next = new Set<number>();
+        for (const r of prev) if (r < rowCount) next.add(r);
+        return next.size === prev.size ? prev : next;
+      });
+      setFrozenRowsState((n) => Math.min(n, rowCount));
+    }, [rowCount]);
+
+    // Bubble display-state up so the host can render menu enablement / chips.
+    useEffect(() => {
+      onDisplayStateChange?.({
+        frozenRows,
+        frozenColumns,
+        hiddenRowCount: hiddenRows.size,
+        hiddenColumnCount: hiddenColumns.size,
+      });
+    }, [frozenRows, frozenColumns, hiddenRows, hiddenColumns, onDisplayStateChange]);
 
     const widthFor = useCallback(
       (index: number) => columnWidths[index] ?? DEFAULT_COL_WIDTH,
       [columnWidths],
     );
 
+    // --- Visible columns / rows mapping ---
+    // Columns are filtered by hidden set. Frozen count refers to the first N
+    // VISIBLE columns (Excel-style: hiding a column doesn't shift the freeze).
+    const visibleColumns = useMemo(
+      () => columns.filter((c) => !hiddenColumns.has(c.index)),
+      [columns, hiddenColumns],
+    );
+    const effectiveFrozenColumns = Math.min(frozenColumns, visibleColumns.length);
+
+    // Map of display-row index → real data-row index. When nothing is hidden
+    // this is the identity (we avoid materializing the array in that case).
+    const visibleRowIndices = useMemo<number[] | null>(() => {
+      if (hiddenRows.size === 0) return null;
+      const arr: number[] = [];
+      for (let i = 0; i < rowCount; i++) {
+        if (!hiddenRows.has(i)) arr.push(i);
+      }
+      return arr;
+    }, [hiddenRows, rowCount]);
+    const displayRowCount = visibleRowIndices ? visibleRowIndices.length : rowCount;
+    const dataRowFor = useCallback(
+      (displayIdx: number) =>
+        visibleRowIndices ? visibleRowIndices[displayIdx] : displayIdx,
+      [visibleRowIndices],
+    );
+    const effectiveFrozenRows = Math.min(frozenRows, displayRowCount);
+
+    // Cumulative left offset for each frozen visible column (in CSS pixels),
+    // measured from the left edge of the row-index cell.
+    const frozenColLefts = useMemo(() => {
+      const lefts: number[] = [];
+      let acc = ROW_INDEX_WIDTH;
+      for (let i = 0; i < effectiveFrozenColumns; i++) {
+        lefts.push(acc);
+        acc += widthFor(visibleColumns[i].index);
+      }
+      return lefts;
+    }, [effectiveFrozenColumns, visibleColumns, widthFor]);
+    const frozenColumnsRightEdge = useMemo(() => {
+      let acc = ROW_INDEX_WIDTH;
+      for (let i = 0; i < effectiveFrozenColumns; i++) {
+        acc += widthFor(visibleColumns[i].index);
+      }
+      return acc;
+    }, [effectiveFrozenColumns, visibleColumns, widthFor]);
+
     const totalWidth = useMemo(
-      () => ROW_INDEX_WIDTH + columns.reduce((acc, c) => acc + widthFor(c.index), 0),
-      [columns, widthFor],
+      () =>
+        ROW_INDEX_WIDTH +
+        visibleColumns.reduce((acc, c) => acc + widthFor(c.index), 0),
+      [visibleColumns, widthFor],
     );
 
     const rowVirtualizer = useVirtualizer({
-      count: rowCount,
+      count: displayRowCount,
       getScrollElement: () => scrollRef.current,
       estimateSize: () => rowHeight,
       overscan: 12,
@@ -111,24 +255,51 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
 
     useEffect(() => {
       rowVirtualizer.measure();
-    }, [rowHeight, rowCount, rowVirtualizer]);
+    }, [rowHeight, displayRowCount, rowVirtualizer]);
 
     useEffect(() => {
       if (jumpToRow != null) {
-        rowVirtualizer.scrollToIndex(jumpToRow, { align: "center" });
+        // jumpToRow is a data-row index; translate to a display row.
+        let target = jumpToRow;
+        if (visibleRowIndices) {
+          // Find the display index of this real row, or the nearest visible one.
+          const idx = visibleRowIndices.indexOf(jumpToRow);
+          target = idx >= 0 ? idx : 0;
+        }
+        rowVirtualizer.scrollToIndex(target, { align: "center" });
       }
-    }, [jumpToRow, rowVirtualizer]);
+    }, [jumpToRow, rowVirtualizer, visibleRowIndices]);
 
     const virtualItems = rowVirtualizer.getVirtualItems();
 
+    // Ensure the cache always has visible-viewport rows AND any frozen rows.
     useEffect(() => {
+      // Always hold the frozen band.
+      if (effectiveFrozenRows > 0) {
+        const realRows: number[] = [];
+        for (let i = 0; i < effectiveFrozenRows; i++) {
+          realRows.push(dataRowFor(i));
+        }
+        // Group into a single span where possible (the cache loads pages
+        // anyway, so even a sparse list resolves to the same pages).
+        const min = Math.min(...realRows);
+        const max = Math.max(...realRows);
+        void cache.ensure(min, max + 1).then(() => {
+          forceTick((t) => t + 1);
+        });
+      }
       if (virtualItems.length === 0) return;
-      const first = virtualItems[0].index;
-      const last = virtualItems[virtualItems.length - 1].index + 1;
-      void cache.ensure(first, last).then(() => {
+      const firstDisplay = virtualItems[0].index;
+      const lastDisplay = virtualItems[virtualItems.length - 1].index;
+      // Translate display range → data-row range.
+      const firstData = dataRowFor(firstDisplay);
+      const lastData = dataRowFor(lastDisplay);
+      const lo = Math.min(firstData, lastData);
+      const hi = Math.max(firstData, lastData) + 1;
+      void cache.ensure(lo, hi).then(() => {
         forceTick((t) => t + 1);
       });
-    }, [virtualItems, cache, cacheVersion]);
+    }, [virtualItems, cache, cacheVersion, dataRowFor, effectiveFrozenRows]);
 
     // --- Sorting on header click ---
     const onHeaderClick = useCallback(
@@ -170,7 +341,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           const delta = ev.clientX - startX;
           setColumnWidths((prev) => ({
             ...prev,
-            [columnIndex]: Math.max(60, startWidth + delta),
+            [columnIndex]: Math.max(MIN_COL_WIDTH, startWidth + delta),
           }));
         };
         const onUp = () => {
@@ -184,6 +355,98 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       [widthFor],
     );
 
+    // --- Auto-size column ---
+    const getMeasureContext = useCallback(() => {
+      if (!measureCanvasRef.current) {
+        measureCanvasRef.current = document.createElement("canvas");
+      }
+      const ctx = measureCanvasRef.current.getContext("2d");
+      if (!ctx) return null;
+      const sample = innerRef.current?.querySelector<HTMLElement>(
+        ".grid-cell, .grid-header-cell .name",
+      );
+      let font: string;
+      if (sample) {
+        const cs = window.getComputedStyle(sample);
+        // Build a CSS font shorthand from the parts (Safari sometimes leaves
+        // computed `font` blank when shorthand isn't set).
+        font = `${cs.fontStyle} ${cs.fontVariant} ${cs.fontWeight} ${cs.fontSize} / ${cs.lineHeight} ${cs.fontFamily}`;
+      } else {
+        font =
+          '13px -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif';
+      }
+      ctx.font = font;
+      return ctx;
+    }, []);
+
+    const autoSizeColumn = useCallback(
+      (columnIndex: number) => {
+        const ctx = getMeasureContext();
+        if (!ctx) return;
+        let widest = 0;
+        for (const { index, row } of cache.loadedRows()) {
+          if (hiddenRows.has(index)) continue;
+          const value = row[columnIndex] ?? "";
+          if (!value) continue;
+          const w = ctx.measureText(value).width;
+          if (w > widest) widest = w;
+        }
+        // Account for the header text + badges.
+        const col = columns.find((c) => c.index === columnIndex);
+        const headerNameWidth = col ? ctx.measureText(col.name).width : 0;
+        const headerNeed = headerNameWidth + HEADER_CONTENT_OVERHEAD;
+        const contentNeed = widest + CELL_HPADDING * 2 + 6;
+        const target = Math.max(MIN_COL_WIDTH, Math.min(MAX_AUTOSIZE_WIDTH, Math.max(headerNeed, contentNeed)));
+        setColumnWidths((prev) => ({ ...prev, [columnIndex]: Math.ceil(target) }));
+      },
+      [cache, columns, getMeasureContext, hiddenRows],
+    );
+
+    const autoSizeAllColumns = useCallback(() => {
+      for (const c of visibleColumns) autoSizeColumn(c.index);
+    }, [visibleColumns, autoSizeColumn]);
+
+    // --- Hide / freeze actions ---
+    const hideColumn = useCallback((columnIndex: number) => {
+      setHiddenColumns((prev) => {
+        const next = new Set(prev);
+        next.add(columnIndex);
+        return next;
+      });
+    }, []);
+
+    const hideRow = useCallback((rowIndex: number) => {
+      setHiddenRows((prev) => {
+        const next = new Set(prev);
+        next.add(rowIndex);
+        return next;
+      });
+    }, []);
+
+    const showAllHidden = useCallback(() => {
+      setHiddenColumns(new Set());
+      setHiddenRows(new Set());
+    }, []);
+
+    const setFrozenRows = useCallback(
+      (n: number) => {
+        const clamped = Math.max(0, Math.min(n, displayRowCount));
+        setFrozenRowsState(clamped);
+      },
+      [displayRowCount],
+    );
+    const setFrozenColumns = useCallback(
+      (n: number) => {
+        const clamped = Math.max(0, Math.min(n, visibleColumns.length));
+        setFrozenColumnsState(clamped);
+      },
+      [visibleColumns.length],
+    );
+    const unfreezeAll = useCallback(() => {
+      setFrozenRowsState(0);
+      setFrozenColumnsState(0);
+    }, []);
+
     // --- Cell interaction ---
     const beginEdit = useCallback(
       (initial?: string) => {
@@ -192,10 +455,39 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         const current = row ? (row[activeCell.col] ?? "") : "";
         setEditingCell({ ...activeCell });
         setEditValue(initial != null ? initial : current);
-        // Focus the input after it mounts.
         setTimeout(() => editInputRef.current?.focus(), 0);
       },
       [activeCell, cache],
+    );
+
+    const requestDeleteRows = useCallback(
+      (rows: number[]) => {
+        if (rows.length === 0) return;
+        setConfirm({
+          message: `Delete ${rows.length} row${rows.length === 1 ? "" : "s"}?`,
+          detail: rows.length === 1 ? `Row ${rows[0] + 1}` : undefined,
+          confirmLabel: "Delete",
+          destructive: true,
+          onConfirm: () => onDeleteRows(rows),
+        });
+      },
+      [onDeleteRows],
+    );
+
+    const requestDeleteColumn = useCallback(
+      (columnIndex: number) => {
+        if (!onDeleteColumn) return;
+        const col = columns.find((c) => c.index === columnIndex);
+        const name = col?.name ?? `Column ${columnIndex + 1}`;
+        setConfirm({
+          message: `Delete column "${name}"?`,
+          detail: "This removes the column from every row. You can undo with ⌘Z.",
+          confirmLabel: "Delete column",
+          destructive: true,
+          onConfirm: () => onDeleteColumn(columnIndex),
+        });
+      },
+      [columns, onDeleteColumn],
     );
 
     useImperativeHandle(
@@ -203,8 +495,40 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       () => ({
         beginEdit,
         focus: () => scrollRef.current?.focus(),
+        autoSizeColumn,
+        autoSizeAllColumns,
+        setFrozenRows,
+        setFrozenColumns,
+        unfreezeAll,
+        hideColumn,
+        hideRow,
+        showAllHidden,
+        requestDeleteRows,
+        requestDeleteColumn,
+        getDisplayState: () => ({
+          frozenRows,
+          frozenColumns,
+          hiddenRowCount: hiddenRows.size,
+          hiddenColumnCount: hiddenColumns.size,
+        }),
       }),
-      [beginEdit],
+      [
+        beginEdit,
+        autoSizeColumn,
+        autoSizeAllColumns,
+        setFrozenRows,
+        setFrozenColumns,
+        unfreezeAll,
+        hideColumn,
+        hideRow,
+        showAllHidden,
+        requestDeleteRows,
+        requestDeleteColumn,
+        frozenRows,
+        frozenColumns,
+        hiddenRows,
+        hiddenColumns,
+      ],
     );
 
     const commitEdit = useCallback(() => {
@@ -212,7 +536,6 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       onCellCommit(editingCell.row, editingCell.col, editValue);
       setEditingCell(null);
       setEditValue("");
-      // Return focus to the grid so keyboard nav works again.
       setTimeout(() => scrollRef.current?.focus(), 0);
     }, [editingCell, editValue, onCellCommit]);
 
@@ -239,21 +562,49 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     );
 
     // --- Keyboard navigation ---
+    // Movement is in DATA-row terms (the active cell stays anchored to a real
+    // data row even when the visible mapping changes). When jumping by ±1 we
+    // hop to the next visible neighbour.
     const moveActive = useCallback(
       (drow: number, dcol: number) => {
         if (!activeCell) {
-          onActiveCellChange({ row: 0, col: 0 });
+          const firstRow = visibleRowIndices ? visibleRowIndices[0] ?? 0 : 0;
+          const firstCol = visibleColumns[0]?.index ?? 0;
+          onActiveCellChange({ row: firstRow, col: firstCol });
           return;
         }
-        const nextRow = Math.max(0, Math.min(rowCount - 1, activeCell.row + drow));
-        const nextCol = Math.max(
-          0,
-          Math.min(columns.length - 1, activeCell.col + dcol),
-        );
+        // Column step: walk through visibleColumns by index in that array.
+        let nextCol = activeCell.col;
+        if (dcol !== 0) {
+          const visIdx = visibleColumns.findIndex((c) => c.index === activeCell.col);
+          let target = visIdx === -1 ? 0 : visIdx + dcol;
+          target = Math.max(0, Math.min(visibleColumns.length - 1, target));
+          nextCol = visibleColumns[target]?.index ?? activeCell.col;
+        }
+        // Row step: walk through visibleRowIndices.
+        let nextRow = activeCell.row;
+        if (drow !== 0) {
+          if (visibleRowIndices) {
+            const visIdx = visibleRowIndices.indexOf(activeCell.row);
+            let target = visIdx === -1 ? 0 : visIdx + drow;
+            target = Math.max(0, Math.min(visibleRowIndices.length - 1, target));
+            nextRow = visibleRowIndices[target] ?? activeCell.row;
+            rowVirtualizer.scrollToIndex(target, { align: "auto" });
+          } else {
+            nextRow = Math.max(0, Math.min(rowCount - 1, activeCell.row + drow));
+            rowVirtualizer.scrollToIndex(nextRow, { align: "auto" });
+          }
+        }
         onActiveCellChange({ row: nextRow, col: nextCol });
-        rowVirtualizer.scrollToIndex(nextRow, { align: "auto" });
       },
-      [activeCell, rowCount, columns.length, onActiveCellChange, rowVirtualizer],
+      [
+        activeCell,
+        visibleColumns,
+        visibleRowIndices,
+        rowCount,
+        onActiveCellChange,
+        rowVirtualizer,
+      ],
     );
 
     const onKeyDown = useCallback(
@@ -262,9 +613,13 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           // Let the input handle its own keys.
           return;
         }
+        if (confirm) {
+          // Modal traps keys.
+          return;
+        }
         const meta = e.metaKey || e.ctrlKey;
         // Copy / cut / paste
-        if (meta && !e.shiftKey) {
+        if (meta && !e.shiftKey && !e.altKey) {
           if (e.key === "c" || e.key === "C") {
             if (activeCell) {
               e.preventDefault();
@@ -295,7 +650,9 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
             e.key === "Enter"
           ) {
             e.preventDefault();
-            onActiveCellChange({ row: 0, col: 0 });
+            const firstRow = visibleRowIndices ? visibleRowIndices[0] ?? 0 : 0;
+            const firstCol = visibleColumns[0]?.index ?? 0;
+            onActiveCellChange({ row: firstRow, col: firstCol });
             return;
           }
         }
@@ -322,14 +679,16 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
             e.preventDefault();
             onActiveCellChange({
               row: activeCell.row,
-              col: 0,
+              col: visibleColumns[0]?.index ?? activeCell.col,
             });
             return;
           case "End":
             e.preventDefault();
             onActiveCellChange({
               row: activeCell.row,
-              col: columns.length - 1,
+              col:
+                visibleColumns[visibleColumns.length - 1]?.index ??
+                activeCell.col,
             });
             return;
           case "PageDown":
@@ -345,11 +704,18 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
             e.preventDefault();
             beginEdit();
             return;
+          case "Escape":
+            // Escape clears any open context menu first.
+            if (contextMenu) {
+              e.preventDefault();
+              setContextMenu(null);
+            }
+            return;
           case "Delete":
           case "Backspace":
             if (meta || e.shiftKey) {
               e.preventDefault();
-              onDeleteRows([activeCell.row]);
+              requestDeleteRows([activeCell.row]);
               return;
             }
             e.preventDefault();
@@ -364,9 +730,11 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       },
       [
         editingCell,
+        confirm,
         activeCell,
         rowCount,
-        columns.length,
+        visibleRowIndices,
+        visibleColumns,
         moveActive,
         onActiveCellChange,
         beginEdit,
@@ -374,7 +742,8 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         onCut,
         onPaste,
         onCellCommit,
-        onDeleteRows,
+        requestDeleteRows,
+        contextMenu,
       ],
     );
 
@@ -396,6 +765,43 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       [commitEdit, cancelEdit, moveActive],
     );
 
+    // --- Context menu ---
+    const onHeaderContextMenu = useCallback(
+      (e: React.MouseEvent, col: ColumnMeta) => {
+        e.preventDefault();
+        setContextMenu({ x: e.clientX, y: e.clientY, kind: "header", index: col.index });
+      },
+      [],
+    );
+
+    const onRowIndexContextMenu = useCallback(
+      (e: React.MouseEvent, displayRow: number) => {
+        e.preventDefault();
+        setContextMenu({
+          x: e.clientX,
+          y: e.clientY,
+          kind: "rowindex",
+          index: dataRowFor(displayRow),
+        });
+      },
+      [dataRowFor],
+    );
+
+    // Dismiss the context menu on any outside click / scroll / escape.
+    useEffect(() => {
+      if (!contextMenu) return;
+      const dismiss = () => setContextMenu(null);
+      window.addEventListener("mousedown", dismiss);
+      window.addEventListener("blur", dismiss);
+      const scroller = scrollRef.current;
+      scroller?.addEventListener("scroll", dismiss);
+      return () => {
+        window.removeEventListener("mousedown", dismiss);
+        window.removeEventListener("blur", dismiss);
+        scroller?.removeEventListener("scroll", dismiss);
+      };
+    }, [contextMenu]);
+
     const renderCellText = (text: string): React.ReactNode =>
       highlightText(text, highlightQuery);
 
@@ -407,6 +813,120 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       if (sortKeys.length > 1) return `${arrow}${idx + 1}`;
       return arrow;
     };
+
+    // Render-helper: a single data row, given its display index.
+    // Used both inside the virtualized scrollable area and the frozen band.
+    function renderRow(
+      displayIdx: number,
+      opts: { absolute: boolean; topPx?: number; key: string | number },
+    ) {
+      const dataRow = dataRowFor(displayIdx);
+      const row = cache.get(dataRow);
+      const isHit = searchHitRows.has(dataRow);
+      const isSelectedRow = activeCell != null && activeCell.row === dataRow;
+      const isFrozenRow = displayIdx < effectiveFrozenRows;
+      const baseStyle: React.CSSProperties = opts.absolute
+        ? {
+            height: rowHeight,
+            transform: `translateY(${opts.topPx}px)`,
+            width: totalWidth,
+            position: "absolute",
+            top: 0,
+            left: 0,
+          }
+        : {
+            height: rowHeight,
+            width: totalWidth,
+            position: "relative",
+          };
+      return (
+        <div
+          key={opts.key}
+          className={`grid-row ${isHit ? "hit" : ""} ${
+            isSelectedRow ? "row-selected" : ""
+          } ${isFrozenRow ? "frozen-row" : ""}`}
+          role="row"
+          data-testid={`row-${displayIdx}`}
+          style={baseStyle}
+        >
+          <div
+            className={`row-index-cell ${effectiveFrozenColumns > 0 || effectiveFrozenRows > 0 ? "sticky-left" : ""} ${isFrozenRow ? "frozen" : ""}`}
+            style={{
+              height: rowHeight,
+              ...(effectiveFrozenColumns > 0 || effectiveFrozenRows > 0
+                ? { position: "sticky", left: 0, zIndex: isFrozenRow ? 4 : 2 }
+                : null),
+            }}
+            onContextMenu={(e) => onRowIndexContextMenu(e, displayIdx)}
+            data-testid={`row-index-${displayIdx}`}
+            title="Right-click for row options"
+          >
+            {dataRow + 1}
+          </div>
+          {visibleColumns.map((col, visibleColIdx) => {
+            const value = row ? (row[col.index] ?? "") : "";
+            const numeric = numericKinds.has(col.kind);
+            const isActive =
+              activeCell != null &&
+              activeCell.row === dataRow &&
+              activeCell.col === col.index;
+            const isEditingThis =
+              editingCell != null &&
+              editingCell.row === dataRow &&
+              editingCell.col === col.index;
+            const isFrozenCol = visibleColIdx < effectiveFrozenColumns;
+            const stickyStyle: React.CSSProperties = isFrozenCol
+              ? {
+                  position: "sticky",
+                  left: frozenColLefts[visibleColIdx],
+                  zIndex: isFrozenRow ? 4 : 2,
+                }
+              : {};
+            return (
+              <div
+                key={col.index}
+                className={`grid-cell ${numeric ? "numeric" : ""} ${
+                  row ? "" : "loading"
+                } ${isActive ? "cell-active" : ""} ${isFrozenCol ? "frozen-col" : ""} ${isFrozenRow ? "frozen" : ""}`}
+                role="cell"
+                style={{
+                  width: widthFor(col.index),
+                  height: rowHeight,
+                  ...stickyStyle,
+                }}
+                title={value}
+                onClick={(e) => onCellClick(e, dataRow, col.index)}
+                onDoubleClick={(e) => onCellDoubleClick(e, dataRow, col.index)}
+                data-testid={`cell-${dataRow}-${col.index}`}
+              >
+                {isEditingThis ? (
+                  <input
+                    ref={editInputRef}
+                    className="cell-edit-input"
+                    value={editValue}
+                    onChange={(ev) => setEditValue(ev.target.value)}
+                    onBlur={commitEdit}
+                    onKeyDown={onEditInputKeyDown}
+                    autoFocus
+                    data-testid={`cell-edit-${dataRow}-${col.index}`}
+                  />
+                ) : row ? (
+                  renderCellText(value)
+                ) : (
+                  "…"
+                )}
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    const frozenRowsHeight = effectiveFrozenRows * rowHeight;
+    const totalHeight =
+      rowVirtualizer.getTotalSize() + HEADER_HEIGHT + frozenRowsHeight;
+
+    const hasHidden = hiddenRows.size > 0 || hiddenColumns.size > 0;
 
     return (
       <div
@@ -421,28 +941,57 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           ref={innerRef}
           style={{
             width: totalWidth,
-            height: rowVirtualizer.getTotalSize() + HEADER_HEIGHT,
+            height: totalHeight,
           }}
         >
+          {/* --- Header row --- */}
           <div
             className="grid-header-row"
             style={{ width: totalWidth, height: HEADER_HEIGHT }}
             role="row"
           >
             <div
-              className="row-index-header"
-              style={{ height: HEADER_HEIGHT }}
+              className={`row-index-header ${effectiveFrozenColumns > 0 ? "sticky-left" : ""}`}
+              style={{
+                height: HEADER_HEIGHT,
+                ...(effectiveFrozenColumns > 0
+                  ? { position: "sticky", left: 0, zIndex: 6 }
+                  : null),
+              }}
               aria-label="Row number"
+              title={
+                hasHidden
+                  ? `${hiddenRows.size} hidden row(s), ${hiddenColumns.size} hidden column(s) — click to show all`
+                  : "#"
+              }
+              onClick={() => {
+                if (hasHidden) showAllHidden();
+              }}
+              data-testid="row-index-header"
             >
-              #
+              {hasHidden ? (
+                <span className="hidden-pill" aria-label="Hidden items">
+                  {hiddenRows.size + hiddenColumns.size}
+                </span>
+              ) : (
+                "#"
+              )}
             </div>
-            {columns.map((col) => {
+            {visibleColumns.map((col, visibleColIdx) => {
               const sortLabel = sortLabelFor(col.index);
               const isSelected = selectedColumn === col.index;
+              const isFrozenCol = visibleColIdx < effectiveFrozenColumns;
+              const stickyStyle: React.CSSProperties = isFrozenCol
+                ? {
+                    position: "sticky",
+                    left: frozenColLefts[visibleColIdx],
+                    zIndex: 5,
+                  }
+                : {};
               return (
                 <div
                   key={col.index}
-                  className="grid-header-cell"
+                  className={`grid-header-cell ${isFrozenCol ? "frozen-col" : ""}`}
                   role="columnheader"
                   aria-sort={
                     sortLabel.startsWith("▲")
@@ -455,9 +1004,12 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
                     width: widthFor(col.index),
                     height: HEADER_HEIGHT,
                     background: isSelected ? "var(--bg-row-hover)" : undefined,
+                    ...stickyStyle,
                   }}
                   onClick={(e) => onHeaderClick(e, col)}
+                  onContextMenu={(e) => onHeaderContextMenu(e, col)}
                   data-testid={`header-${col.index}`}
+                  title="Right-click for column options"
                 >
                   <span className={`kind ${col.kind}`}>{col.kind.slice(0, 3)}</span>
                   <span className="name">{col.name}</span>
@@ -465,6 +1017,11 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
                   <div
                     className={`resize-handle ${resizing === col.index ? "dragging" : ""}`}
                     onMouseDown={(e) => startResize(e, col.index)}
+                    onDoubleClick={(e) => {
+                      e.stopPropagation();
+                      autoSizeColumn(col.index);
+                    }}
+                    title="Drag to resize, double-click to auto-size"
                     data-testid={`resize-${col.index}`}
                   />
                 </div>
@@ -472,78 +1029,460 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
             })}
           </div>
 
+          {/* --- Frozen rows band --- */}
+          {effectiveFrozenRows > 0 && (
+            <div
+              className="grid-frozen-band"
+              style={{
+                position: "sticky",
+                top: HEADER_HEIGHT,
+                zIndex: 3,
+                width: totalWidth,
+                height: frozenRowsHeight,
+                marginLeft: 0,
+              }}
+              data-testid="frozen-band"
+            >
+              {Array.from({ length: effectiveFrozenRows }).map((_, i) =>
+                renderRow(i, {
+                  absolute: true,
+                  topPx: i * rowHeight,
+                  key: `frozen-${i}`,
+                }),
+              )}
+            </div>
+          )}
+
+          {/* --- Virtualized rows (scrolling region) --- */}
           {virtualItems.map((virtualRow) => {
-            const row = cache.get(virtualRow.index);
-            const isHit = searchHitRows.has(virtualRow.index);
-            const isSelectedRow =
-              activeCell != null && activeCell.row === virtualRow.index;
-            return (
-              <div
-                key={virtualRow.key}
-                className={`grid-row ${isHit ? "hit" : ""} ${
-                  isSelectedRow ? "row-selected" : ""
-                }`}
-                role="row"
-                data-testid={`row-${virtualRow.index}`}
-                style={{
-                  height: rowHeight,
-                  transform: `translateY(${virtualRow.start + HEADER_HEIGHT}px)`,
-                  width: totalWidth,
-                }}
-              >
-                <div className="row-index-cell" style={{ height: rowHeight }}>
-                  {virtualRow.index + 1}
-                </div>
-                {columns.map((col) => {
-                  const value = row ? (row[col.index] ?? "") : "";
-                  const numeric = numericKinds.has(col.kind);
-                  const isActive =
-                    activeCell != null &&
-                    activeCell.row === virtualRow.index &&
-                    activeCell.col === col.index;
-                  const isEditingThis =
-                    editingCell != null &&
-                    editingCell.row === virtualRow.index &&
-                    editingCell.col === col.index;
-                  return (
-                    <div
-                      key={col.index}
-                      className={`grid-cell ${numeric ? "numeric" : ""} ${
-                        row ? "" : "loading"
-                      } ${isActive ? "cell-active" : ""}`}
-                      role="cell"
-                      style={{ width: widthFor(col.index), height: rowHeight }}
-                      title={value}
-                      onClick={(e) => onCellClick(e, virtualRow.index, col.index)}
-                      onDoubleClick={(e) =>
-                        onCellDoubleClick(e, virtualRow.index, col.index)
-                      }
-                      data-testid={`cell-${virtualRow.index}-${col.index}`}
-                    >
-                      {isEditingThis ? (
-                        <input
-                          ref={editInputRef}
-                          className="cell-edit-input"
-                          value={editValue}
-                          onChange={(ev) => setEditValue(ev.target.value)}
-                          onBlur={commitEdit}
-                          onKeyDown={onEditInputKeyDown}
-                          autoFocus
-                          data-testid={`cell-edit-${virtualRow.index}-${col.index}`}
-                        />
-                      ) : row ? (
-                        renderCellText(value)
-                      ) : (
-                        "…"
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            );
+            // Skip rows that are already in the frozen band — they'd render
+            // twice and cause a brief overlap as you scroll near the top.
+            if (virtualRow.index < effectiveFrozenRows) return null;
+            return renderRow(virtualRow.index, {
+              absolute: true,
+              topPx: virtualRow.start + HEADER_HEIGHT + frozenRowsHeight,
+              key: String(virtualRow.key),
+            });
           })}
+
+          {/* --- Sticky shadow under the frozen-cols column band --- */}
+          {effectiveFrozenColumns > 0 && (
+            <div
+              className="frozen-cols-shadow"
+              style={{
+                position: "sticky",
+                top: HEADER_HEIGHT + frozenRowsHeight,
+                left: frozenColumnsRightEdge,
+                width: 6,
+                height: 0,
+                zIndex: 1,
+                pointerEvents: "none",
+              }}
+              aria-hidden
+            />
+          )}
         </div>
+
+        {/* --- Context menu --- */}
+        {contextMenu && (
+          <ContextMenu
+            state={contextMenu}
+            columns={columns}
+            visibleColumns={visibleColumns}
+            visibleRowIndices={visibleRowIndices}
+            rowCount={rowCount}
+            displayRowCount={displayRowCount}
+            frozenRows={frozenRows}
+            frozenColumns={frozenColumns}
+            hasHidden={hasHidden}
+            hasDeleteColumn={!!onDeleteColumn}
+            onClose={() => setContextMenu(null)}
+            actions={{
+              autoSize: autoSizeColumn,
+              autoSizeAll: autoSizeAllColumns,
+              hideColumn,
+              hideRow,
+              showAll: showAllHidden,
+              freezeRowsThrough: (displayIdx) => setFrozenRows(displayIdx + 1),
+              freezeColumnsThrough: (visibleColIdx) =>
+                setFrozenColumns(visibleColIdx + 1),
+              unfreezeRows: () => setFrozenRowsState(0),
+              unfreezeColumns: () => setFrozenColumnsState(0),
+              deleteRow: (dataRow) => requestDeleteRows([dataRow]),
+              deleteColumn: requestDeleteColumn,
+              sortAsc: (col) =>
+                onSortChange([{ column: col, direction: "asc" }]),
+              sortDesc: (col) =>
+                onSortChange([{ column: col, direction: "desc" }]),
+              clearSort: () => onSortChange([]),
+            }}
+          />
+        )}
+
+        {/* --- Confirm modal --- */}
+        {confirm && (
+          <ConfirmModal
+            state={confirm}
+            onCancel={() => setConfirm(null)}
+            onConfirm={() => {
+              const action = confirm.onConfirm;
+              setConfirm(null);
+              action();
+            }}
+          />
+        )}
       </div>
     );
   },
 );
+
+// ---------------------------------------------------------------------------
+// Subcomponents
+// ---------------------------------------------------------------------------
+
+interface ContextMenuActions {
+  autoSize: (columnIndex: number) => void;
+  autoSizeAll: () => void;
+  hideColumn: (columnIndex: number) => void;
+  hideRow: (rowIndex: number) => void;
+  showAll: () => void;
+  freezeRowsThrough: (displayRowIdx: number) => void;
+  freezeColumnsThrough: (visibleColIdx: number) => void;
+  unfreezeRows: () => void;
+  unfreezeColumns: () => void;
+  deleteRow: (dataRowIndex: number) => void;
+  deleteColumn: (columnIndex: number) => void;
+  sortAsc: (columnIndex: number) => void;
+  sortDesc: (columnIndex: number) => void;
+  clearSort: () => void;
+}
+
+interface ContextMenuProps {
+  state: ContextMenuState;
+  columns: ColumnMeta[];
+  visibleColumns: ColumnMeta[];
+  visibleRowIndices: number[] | null;
+  rowCount: number;
+  displayRowCount: number;
+  frozenRows: number;
+  frozenColumns: number;
+  hasHidden: boolean;
+  hasDeleteColumn: boolean;
+  onClose: () => void;
+  actions: ContextMenuActions;
+}
+
+function ContextMenu(props: ContextMenuProps) {
+  const {
+    state,
+    columns,
+    visibleColumns,
+    visibleRowIndices,
+    rowCount,
+    displayRowCount,
+    frozenRows,
+    frozenColumns,
+    hasHidden,
+    hasDeleteColumn,
+    onClose,
+    actions,
+  } = props;
+  // Pin the menu inside the viewport.
+  const [coords, setCoords] = useState({ x: state.x, y: state.y });
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    let x = state.x;
+    let y = state.y;
+    if (x + rect.width > vw - 8) x = Math.max(8, vw - rect.width - 8);
+    if (y + rect.height > vh - 8) y = Math.max(8, vh - rect.height - 8);
+    if (x !== coords.x || y !== coords.y) setCoords({ x, y });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.x, state.y]);
+
+  // Stop propagation so the global mousedown dismiss handler doesn't fire.
+  const stop = (e: React.MouseEvent) => e.stopPropagation();
+
+  const items: React.ReactNode[] = [];
+
+  if (state.kind === "header") {
+    const colIndex = state.index;
+    const visibleColIdx = visibleColumns.findIndex((c) => c.index === colIndex);
+    const col = columns.find((c) => c.index === colIndex);
+    items.push(
+      <div className="ctxmenu-section" key="hdr">
+        <div className="ctxmenu-title">{col?.name ?? `Column ${colIndex + 1}`}</div>
+      </div>,
+      <button
+        key="sort-asc"
+        className="ctxmenu-item"
+        onClick={() => {
+          actions.sortAsc(colIndex);
+          onClose();
+        }}
+      >
+        Sort ascending
+      </button>,
+      <button
+        key="sort-desc"
+        className="ctxmenu-item"
+        onClick={() => {
+          actions.sortDesc(colIndex);
+          onClose();
+        }}
+      >
+        Sort descending
+      </button>,
+      <button
+        key="clear-sort"
+        className="ctxmenu-item"
+        onClick={() => {
+          actions.clearSort();
+          onClose();
+        }}
+      >
+        Clear sort
+      </button>,
+      <div className="ctxmenu-divider" key="d1" />,
+      <button
+        key="autosize"
+        className="ctxmenu-item"
+        onClick={() => {
+          actions.autoSize(colIndex);
+          onClose();
+        }}
+      >
+        Auto-size column
+      </button>,
+      <button
+        key="autosize-all"
+        className="ctxmenu-item"
+        onClick={() => {
+          actions.autoSizeAll();
+          onClose();
+        }}
+      >
+        Auto-size all columns
+      </button>,
+      <div className="ctxmenu-divider" key="d2" />,
+    );
+    if (visibleColIdx >= 0) {
+      items.push(
+        <button
+          key="freeze-thru"
+          className="ctxmenu-item"
+          onClick={() => {
+            actions.freezeColumnsThrough(visibleColIdx);
+            onClose();
+          }}
+        >
+          Freeze columns through here
+          <kbd className="ctxmenu-kbd">{visibleColIdx + 1}</kbd>
+        </button>,
+      );
+    }
+    if (frozenColumns > 0) {
+      items.push(
+        <button
+          key="unfreeze-cols"
+          className="ctxmenu-item"
+          onClick={() => {
+            actions.unfreezeColumns();
+            onClose();
+          }}
+        >
+          Unfreeze columns
+        </button>,
+      );
+    }
+    items.push(
+      <div className="ctxmenu-divider" key="d3" />,
+      <button
+        key="hide-col"
+        className="ctxmenu-item"
+        disabled={visibleColumns.length <= 1}
+        onClick={() => {
+          actions.hideColumn(colIndex);
+          onClose();
+        }}
+      >
+        Hide column
+      </button>,
+    );
+    if (hasHidden) {
+      items.push(
+        <button
+          key="show-all"
+          className="ctxmenu-item"
+          onClick={() => {
+            actions.showAll();
+            onClose();
+          }}
+        >
+          Show all hidden
+        </button>,
+      );
+    }
+    if (hasDeleteColumn) {
+      items.push(
+        <div className="ctxmenu-divider" key="d4" />,
+        <button
+          key="delete-col"
+          className="ctxmenu-item destructive"
+          disabled={visibleColumns.length <= 1}
+          onClick={() => {
+            actions.deleteColumn(colIndex);
+            onClose();
+          }}
+        >
+          Delete column…
+        </button>,
+      );
+    }
+  } else {
+    const dataRow = state.index;
+    const displayIdx = visibleRowIndices
+      ? visibleRowIndices.indexOf(dataRow)
+      : dataRow;
+    items.push(
+      <div className="ctxmenu-section" key="hdr">
+        <div className="ctxmenu-title">Row {dataRow + 1}</div>
+      </div>,
+    );
+    if (displayIdx >= 0) {
+      items.push(
+        <button
+          key="freeze-rows"
+          className="ctxmenu-item"
+          onClick={() => {
+            actions.freezeRowsThrough(displayIdx);
+            onClose();
+          }}
+        >
+          Freeze rows through here
+          <kbd className="ctxmenu-kbd">{displayIdx + 1}</kbd>
+        </button>,
+      );
+    }
+    if (frozenRows > 0) {
+      items.push(
+        <button
+          key="unfreeze-rows"
+          className="ctxmenu-item"
+          onClick={() => {
+            actions.unfreezeRows();
+            onClose();
+          }}
+        >
+          Unfreeze rows
+        </button>,
+      );
+    }
+    items.push(
+      <div className="ctxmenu-divider" key="d1" />,
+      <button
+        key="hide-row"
+        className="ctxmenu-item"
+        disabled={displayRowCount <= 1}
+        onClick={() => {
+          actions.hideRow(dataRow);
+          onClose();
+        }}
+      >
+        Hide row
+      </button>,
+    );
+    if (hasHidden) {
+      items.push(
+        <button
+          key="show-all"
+          className="ctxmenu-item"
+          onClick={() => {
+            actions.showAll();
+            onClose();
+          }}
+        >
+          Show all hidden
+        </button>,
+      );
+    }
+    items.push(
+      <div className="ctxmenu-divider" key="d2" />,
+      <button
+        key="delete-row"
+        className="ctxmenu-item destructive"
+        disabled={rowCount <= 1}
+        onClick={() => {
+          actions.deleteRow(dataRow);
+          onClose();
+        }}
+      >
+        Delete row…
+      </button>,
+    );
+  }
+
+  return (
+    <div
+      ref={ref}
+      className="ctxmenu"
+      style={{ position: "fixed", left: coords.x, top: coords.y }}
+      onMouseDown={stop}
+      onClick={stop}
+      role="menu"
+      data-testid="ctxmenu"
+    >
+      {items}
+    </div>
+  );
+}
+
+interface ConfirmModalProps {
+  state: ConfirmState;
+  onCancel: () => void;
+  onConfirm: () => void;
+}
+
+function ConfirmModal({ state, onCancel, onConfirm }: ConfirmModalProps) {
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    confirmRef.current?.focus();
+  }, []);
+  return (
+    <div
+      className="confirm-backdrop"
+      role="dialog"
+      aria-modal="true"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onCancel();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") onCancel();
+      }}
+      data-testid="confirm-modal"
+    >
+      <div className="confirm-modal" onMouseDown={(e) => e.stopPropagation()}>
+        <p className="confirm-message">{state.message}</p>
+        {state.detail && <p className="confirm-detail">{state.detail}</p>}
+        <div className="confirm-buttons">
+          <button onClick={onCancel} data-testid="confirm-cancel">
+            Cancel
+          </button>
+          <button
+            ref={confirmRef}
+            className={state.destructive ? "danger" : "primary"}
+            onClick={onConfirm}
+            data-testid="confirm-ok"
+          >
+            {state.confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

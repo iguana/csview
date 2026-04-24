@@ -162,6 +162,50 @@ pub fn delete_rows(
     Ok(csv.metadata(file_id)?)
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct DeleteColumnResult {
+    pub metadata: CsvMetadata,
+    /// Removed header name; preserved so the frontend can restore it on undo.
+    pub removed_name: String,
+    /// Per-row values that were deleted (in raw storage order).
+    pub removed_values: Vec<String>,
+}
+
+#[tauri::command]
+pub fn delete_column(
+    state: State<'_, AppState>,
+    file_id: String,
+    column: usize,
+) -> Res<DeleteColumnResult> {
+    let mut files = state.files.lock();
+    let csv = files
+        .get_mut(&file_id)
+        .ok_or_else(|| "unknown file_id".to_string())?;
+    let (removed_name, removed_values) = csv.delete_column(column)?;
+    let metadata = csv.metadata(file_id)?;
+    Ok(DeleteColumnResult {
+        metadata,
+        removed_name,
+        removed_values,
+    })
+}
+
+#[tauri::command]
+pub fn insert_column(
+    state: State<'_, AppState>,
+    file_id: String,
+    at: usize,
+    name: String,
+    values: Vec<String>,
+) -> Res<CsvMetadata> {
+    let mut files = state.files.lock();
+    let csv = files
+        .get_mut(&file_id)
+        .ok_or_else(|| "unknown file_id".to_string())?;
+    csv.insert_column(at, name, values)?;
+    Ok(csv.metadata(file_id)?)
+}
+
 #[tauri::command]
 pub fn save_csv(
     state: State<'_, AppState>,

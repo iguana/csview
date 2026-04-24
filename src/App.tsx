@@ -206,6 +206,12 @@ export function App() {
       sidebarCollapsed?: boolean;
       search?: string;
       palette?: string;
+      // Display-state extensions used for QA / screenshots:
+      frozenRows?: number;
+      frozenColumns?: number;
+      hiddenColumns?: number[];
+      hiddenRows?: number[];
+      jumpToRow?: number;
     }>("csview-demo", (event) => {
       setTimeout(() => {
         if (event.payload.sort) setSortKeys(event.payload.sort);
@@ -221,6 +227,18 @@ export function App() {
         if (event.payload.sidebarCollapsed != null)
           setSidebarCollapsed(event.payload.sidebarCollapsed);
         if (event.payload.search != null) setSearchQuery(event.payload.search);
+        if (event.payload.frozenRows != null)
+          gridRef.current?.setFrozenRows(event.payload.frozenRows);
+        if (event.payload.frozenColumns != null)
+          gridRef.current?.setFrozenColumns(event.payload.frozenColumns);
+        if (event.payload.hiddenColumns) {
+          for (const c of event.payload.hiddenColumns)
+            gridRef.current?.hideColumn(c);
+        }
+        if (event.payload.hiddenRows) {
+          for (const r of event.payload.hiddenRows) gridRef.current?.hideRow(r);
+        }
+        if (event.payload.jumpToRow != null) setJumpToRow(event.payload.jumpToRow);
         if (event.payload.palette) {
           // Any palette id; ignore if unrecognized.
           import("./lib/palettes").then(({ isPaletteId }) => {
@@ -500,6 +518,60 @@ export function App() {
     [bumpHistory],
   );
 
+  const onDeleteColumn = useCallback(
+    async (column: number) => {
+      const meta = metadataRef.current;
+      if (!meta) return;
+      try {
+        const result = await api.deleteColumn(meta.file_id, column);
+        setMetadata(result.metadata);
+        cacheRef.current?.invalidate();
+        setCacheVersion((v) => v + 1);
+        // Reset selection / sort so they don't point to a now-stale column.
+        setSelectedColumn(null);
+        setSortKeys((prev) =>
+          prev
+            .filter((k) => k.column !== column)
+            .map((k) =>
+              k.column > column ? { ...k, column: k.column - 1 } : k,
+            ),
+        );
+        setActiveCell((c) =>
+          c && c.col >= result.metadata.column_count
+            ? { row: c.row, col: Math.max(0, result.metadata.column_count - 1) }
+            : c,
+        );
+        const removedName = result.removed_name;
+        const removedValues = result.removed_values;
+        const entry = {
+          label: `Delete column "${removedName}"`,
+          undo: async () => {
+            const m = await api.insertColumn(
+              meta.file_id,
+              column,
+              removedName,
+              removedValues,
+            );
+            setMetadata(m);
+            cacheRef.current?.invalidate();
+            setCacheVersion((v) => v + 1);
+          },
+          redo: async () => {
+            const r = await api.deleteColumn(meta.file_id, column);
+            setMetadata(r.metadata);
+            cacheRef.current?.invalidate();
+            setCacheVersion((v) => v + 1);
+          },
+        };
+        historyRef.current.push(entry);
+        bumpHistory();
+      } catch (e) {
+        setError(errMsg(e));
+      }
+    },
+    [bumpHistory],
+  );
+
   const onInsertRow = useCallback(async () => {
     const meta = metadataRef.current;
     if (!meta) return;
@@ -686,7 +758,38 @@ export function App() {
           void onInsertRow();
           return;
         case "delete_row":
-          if (activeCell) void onDeleteRows([activeCell.row]);
+          if (activeCell) gridRef.current?.requestDeleteRows([activeCell.row]);
+          return;
+        case "delete_column":
+          if (activeCell != null)
+            gridRef.current?.requestDeleteColumn(activeCell.col);
+          return;
+        case "freeze_rows_to_cursor":
+          if (activeCell != null)
+            gridRef.current?.setFrozenRows(activeCell.row + 1);
+          return;
+        case "freeze_columns_to_cursor":
+          if (activeCell != null)
+            gridRef.current?.setFrozenColumns(activeCell.col + 1);
+          return;
+        case "unfreeze_all":
+          gridRef.current?.unfreezeAll();
+          return;
+        case "hide_row":
+          if (activeCell != null) gridRef.current?.hideRow(activeCell.row);
+          return;
+        case "hide_column":
+          if (activeCell != null) gridRef.current?.hideColumn(activeCell.col);
+          return;
+        case "show_all_hidden":
+          gridRef.current?.showAllHidden();
+          return;
+        case "autosize_column":
+          if (activeCell != null)
+            gridRef.current?.autoSizeColumn(activeCell.col);
+          return;
+        case "autosize_all_columns":
+          gridRef.current?.autoSizeAllColumns();
           return;
         case "find":
           // Focus the search input in the toolbar.
@@ -738,6 +841,7 @@ export function App() {
     onToggleHeader,
     onInsertRow,
     onDeleteRows,
+    onDeleteColumn,
     activeCell,
   ]);
 
@@ -991,6 +1095,7 @@ export function App() {
                 onCut={onCut}
                 onPaste={onPaste}
                 onDeleteRows={onDeleteRows}
+                onDeleteColumn={onDeleteColumn}
                 rowHeight={rowHeight}
                 jumpToRow={jumpToRow}
               />

@@ -43,6 +43,8 @@ pub fn run() {
             commands::update_cell,
             commands::insert_row,
             commands::delete_rows,
+            commands::delete_column,
+            commands::insert_column,
             commands::save_csv,
             commands::save_csv_as,
             commands::open_in_new_window,
@@ -82,12 +84,40 @@ pub fn run() {
                         let sidebar_collapsed =
                             std::env::var("CSVIEW_SIDEBAR_COLLAPSED").is_ok();
                         let palette_override = std::env::var("CSVIEW_PALETTE").ok();
+                        let frozen_rows = std::env::var("CSVIEW_FROZEN_ROWS")
+                            .ok()
+                            .and_then(|s| s.parse::<usize>().ok());
+                        let frozen_cols = std::env::var("CSVIEW_FROZEN_COLS")
+                            .ok()
+                            .and_then(|s| s.parse::<usize>().ok());
+                        let hidden_cols: Option<Vec<usize>> = std::env::var("CSVIEW_HIDDEN_COLS")
+                            .ok()
+                            .map(|s| {
+                                s.split(',')
+                                    .filter_map(|x| x.trim().parse::<usize>().ok())
+                                    .collect()
+                            });
+                        let jump_to_row = std::env::var("CSVIEW_JUMP_TO_ROW")
+                            .ok()
+                            .and_then(|s| s.parse::<usize>().ok());
+                        let hidden_rows: Option<Vec<usize>> = std::env::var("CSVIEW_HIDDEN_ROWS")
+                            .ok()
+                            .map(|s| {
+                                s.split(',')
+                                    .filter_map(|x| x.trim().parse::<usize>().ok())
+                                    .collect()
+                            });
                         let payload = serde_json::json!({
                             "sort": [{ "column": 5, "direction": "desc" }],
                             "activeCell": { "row": 2, "col": 4 },
                             "search": "Engineer",
                             "sidebarCollapsed": sidebar_collapsed,
                             "palette": palette_override,
+                            "frozenRows": frozen_rows,
+                            "frozenColumns": frozen_cols,
+                            "hiddenColumns": hidden_cols,
+                            "hiddenRows": hidden_rows,
+                            "jumpToRow": jump_to_row,
                         });
                         let _ = main.emit("csview-demo", payload);
                     }

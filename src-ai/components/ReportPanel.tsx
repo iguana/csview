@@ -122,10 +122,7 @@ export function ReportPanel({ fileId, onProcessing }: ReportPanelProps) {
             <div className="report-content">
               <div className="report-header">
                 <div className="report-title">{report.title}</div>
-                <div className="report-meta">
-                  Generated {new Date(report.generated_at).toLocaleString()}
-                </div>
-                <div className="report-actions">
+<div className="report-actions">
                   <button onClick={() => void handleCopy()}>
                     {copied ? "Copied!" : "Copy Markdown"}
                   </button>

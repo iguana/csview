@@ -1484,6 +1484,141 @@
   flex-wrap: wrap;
 }
 
+.account-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.provider-buttons {
+  display: flex;
+  gap: 4px;
+}
+
+.provider-btn {
+  flex: 1;
+  padding: 7px 0;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 120ms;
+}
+
+.provider-btn:hover {
+  background: var(--bg-row-hover);
+  color: var(--text);
+}
+
+.provider-btn.active {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.model-tier-group {
+  margin-bottom: 4px;
+}
+
+.model-tier-label {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-dim);
+  padding: 4px 6px 2px;
+}
+
+.model-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 120ms;
+}
+
+.model-option:hover {
+  background: var(--bg-row-hover);
+}
+
+.model-option.selected {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 36%, transparent);
+}
+
+.model-option input[type="radio"] {
+  margin-top: 3px;
+  accent-color: var(--accent);
+}
+
+.model-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.model-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.model-desc {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.account-note {
+  margin-top: 10px;
+  font-size: 10px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.account-save-btn {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.account-error,
+.ai-error-banner {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  color: var(--danger);
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+
+.account-success,
+.ai-success-banner {
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--success) 40%, transparent);
+  color: var(--success);
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+
 /* =========================================================================
    AI App layout additions
    ========================================================================= */

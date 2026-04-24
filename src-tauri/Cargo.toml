@@ -1,6 +1,6 @@
 [package]
 name = "csview"
-version = "0.1.0"
+version = "0.2.0"
 description = "A Tauri CSV viewer for macOS"
 authors = ["csview"]
 edition = "2021"

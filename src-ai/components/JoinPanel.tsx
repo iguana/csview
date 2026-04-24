@@ -73,11 +73,11 @@ export function JoinPanel({ fileId, onProcessing, onJoinComplete }: JoinPanelPro
     setSuggesting(true);
     onProcessing(true);
     try {
-      const s = await aiApi.suggestJoin(fileId, rightFile.file_id);
+      const s = await aiApi.suggestJoin(fileId, rightFile.fileId);
       setSuggestion(s);
-      setLeftKey(s.left_key);
-      setRightKey(s.right_key);
-      setJoinType(s.join_type as JoinType);
+      setLeftKey(s.leftKey);
+      setRightKey(s.rightKey);
+      setJoinType(s.joinType as JoinType);
     } catch (e) {
       setError(errMsg(e));
     } finally {
@@ -94,7 +94,7 @@ export function JoinPanel({ fileId, onProcessing, onJoinComplete }: JoinPanelPro
     try {
       const result = await aiApi.executeJoin(
         fileId,
-        rightFile.file_id,
+        rightFile.fileId,
         leftKey,
         rightKey,
         joinType,
@@ -135,7 +135,7 @@ export function JoinPanel({ fileId, onProcessing, onJoinComplete }: JoinPanelPro
                 <span className="join-file-name">{basename(rightPath)}</span>
                 {rightFile && (
                   <span className="join-file-meta">
-                    {rightFile.row_count.toLocaleString()} rows · {rightFile.columns.length} cols
+                    {rightFile.rowCount.toLocaleString()} rows · {rightFile.columns.length} cols
                   </span>
                 )}
                 <button onClick={() => void handlePickFile()} disabled={loadingRight}>
@@ -227,7 +227,7 @@ export function JoinPanel({ fileId, onProcessing, onJoinComplete }: JoinPanelPro
                 <div className="join-result">
                   <div className="join-result-title">Join complete</div>
                   <div className="join-result-stats">
-                    <span>{joinResult.row_count.toLocaleString()} rows</span>
+                    <span>{joinResult.rowCount.toLocaleString()} rows</span>
                     <span>{joinResult.columns.length} columns</span>
                   </div>
                   <div className="join-result-path">{joinResult.path}</div>

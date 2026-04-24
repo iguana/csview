@@ -332,6 +332,25 @@ pub fn delete_rows(
     store.delete_rows(&rowids).map_err(CommandError::from)
 }
 
+/// Drop a column from the SQLite table.
+///
+/// Returns the original (sanitised) column name so the frontend can show a
+/// confirmation toast or reference it on undo. SQLite-backed undo is
+/// best-effort — to fully restore the deleted data the caller re-imports
+/// the file (matches the pattern used by `delete_rows`).
+#[tauri::command]
+pub fn delete_column(
+    state: State<'_, AiAppState>,
+    file_id: String,
+    column: usize,
+) -> Result<String, CommandError> {
+    let mut stores = state.stores.lock();
+    let store = stores
+        .get_mut(&file_id)
+        .ok_or_else(|| CommandError::UnknownFile(file_id))?;
+    store.delete_column(column).map_err(CommandError::from)
+}
+
 /// Export the current table contents back to the file's original path.
 #[tauri::command]
 pub fn save_csv(state: State<'_, AiAppState>, file_id: String) -> Result<(), CommandError> {

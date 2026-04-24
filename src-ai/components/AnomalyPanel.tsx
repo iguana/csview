@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { aiApi } from "../lib/api-ai";
-import type { Anomaly, AnomalyReport } from "../lib/types-ai";
+import type { AnomalyResult, AnomalyReport } from "../lib/types-ai";
 import { SimpleMarkdown } from "./SimpleMarkdown";
 
 function errMsg(e: unknown): string {
@@ -59,7 +59,7 @@ export function AnomalyPanel({ fileId, columns, onProcessing, onJumpToRow }: Ano
     }
   }, [fileId, selectedCols, columns, onProcessing]);
 
-  const rowKey = (a: Anomaly) => `${a.row}-${a.column}`;
+  const rowKey = (a: AnomalyResult) => `${a.row}-${a.column}`;
 
   return (
     <div className="ai-panel anomaly-panel">
@@ -140,7 +140,7 @@ export function AnomalyPanel({ fileId, columns, onProcessing, onJumpToRow }: Ano
                       {report.anomalies.map((a) => (
                         <tr
                           key={rowKey(a)}
-                          className={`anomaly-row severity-${zSeverity(a.z_score)} ${onJumpToRow ? "clickable" : ""}`}
+                          className={`anomaly-row severity-${zSeverity(a.zScore)} ${onJumpToRow ? "clickable" : ""}`}
                           onClick={() => onJumpToRow?.(a.row)}
                           title={onJumpToRow ? "Click to jump to this row" : undefined}
                         >
@@ -148,8 +148,8 @@ export function AnomalyPanel({ fileId, columns, onProcessing, onJumpToRow }: Ano
                           <td>{a.column}</td>
                           <td className="anomaly-value">{a.value}</td>
                           <td className="anomaly-z">
-                            <span className={`issue-badge severity-${zSeverity(a.z_score)}`}>
-                              {a.z_score.toFixed(2)}
+                            <span className={`issue-badge severity-${zSeverity(a.zScore)}`}>
+                              {a.zScore.toFixed(2)}
                             </span>
                           </td>
                           <td className="anomaly-reason">{a.reason}</td>
@@ -162,9 +162,9 @@ export function AnomalyPanel({ fileId, columns, onProcessing, onJumpToRow }: Ano
                 <div className="ai-empty-state">No anomalies detected.</div>
               )}
 
-              {report.narrative && (
+              {report.markdown && (
                 <div className="anomaly-narrative">
-                  <SimpleMarkdown content={report.narrative} />
+                  <SimpleMarkdown content={report.markdown} />
                 </div>
               )}
             </div>

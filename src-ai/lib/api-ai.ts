@@ -20,12 +20,13 @@ import type {
 
 // ---------------------------------------------------------------------------
 // AI feature commands
+// Tauri 2 auto-converts JS camelCase → Rust snake_case, so we use camelCase.
 // ---------------------------------------------------------------------------
 
 export const aiApi = {
   // Account
-  setApiKey(key: string) {
-    return invoke<void>("set_api_key", { key });
+  setApiKey(provider: string, key: string, model: string) {
+    return invoke<void>("set_api_key", { provider, key, model });
   },
   getAccountStatus() {
     return invoke<AccountStatus>("get_account_status");
@@ -106,7 +107,7 @@ export const aiApi = {
 };
 
 // ---------------------------------------------------------------------------
-// CSV commands (SQLite-backed store, different signatures from csview's api.ts)
+// CSV commands (SQLite-backed store)
 // ---------------------------------------------------------------------------
 
 export const csvApi = {
@@ -117,7 +118,7 @@ export const csvApi = {
     return invoke<QueryResult>("query_data", { fileId, sql });
   },
   readRange(fileId: string, offset: number, limit: number, orderBy?: string) {
-    return invoke<QueryResult>("read_range", { fileId, offset, limit, orderBy });
+    return invoke<QueryResult>("read_range", { fileId, offset, limit, orderBy: orderBy ?? null });
   },
   updateCell(fileId: string, rowid: number, column: string, value: string) {
     return invoke<void>("update_cell", { fileId, rowid, column, value });
@@ -127,6 +128,9 @@ export const csvApi = {
   },
   deleteRows(fileId: string, rowids: number[]) {
     return invoke<number>("delete_rows", { fileId, rowids });
+  },
+  deleteColumn(fileId: string, column: number) {
+    return invoke<string>("delete_column", { fileId, column });
   },
   saveCsv(fileId: string) {
     return invoke<void>("save_csv", { fileId });

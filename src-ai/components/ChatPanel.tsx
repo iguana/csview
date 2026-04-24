@@ -50,9 +50,9 @@ function MiniTable({ result }: { result: QueryResult }) {
           ))}
         </tbody>
       </table>
-      {result.row_count > maxRows && (
+      {result.rowCount > maxRows && (
         <div className="chat-mini-table-more">
-          …and {result.row_count - maxRows} more rows
+          …and {result.rowCount - maxRows} more rows
         </div>
       )}
     </div>
@@ -73,7 +73,7 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
           <pre><code>{msg.sql}</code></pre>
         </div>
       )}
-      {msg.queryResult && msg.queryResult.row_count > 0 && (
+      {msg.queryResult && msg.queryResult.rowCount > 0 && (
         <MiniTable result={msg.queryResult} />
       )}
     </div>
@@ -147,15 +147,15 @@ export function ChatPanel({ fileId, onProcessing }: ChatPanelProps) {
     try {
       const response: ChatResponse = await aiApi.chatMessage(
         fileId,
-        currentSession.id,
+        currentSession.sessionId,
         text,
       );
       const assistantMsg: ChatMessage = {
         id: `a-${Date.now()}`,
         role: "assistant",
-        content: response.content,
-        sql: response.sql_executed,
-        queryResult: response.query_result,
+        content: response.message,
+        sql: undefined,
+        queryResult: undefined,
         timestamp: Date.now(),
       };
       setMessages((prev) => [...prev, assistantMsg]);

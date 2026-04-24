@@ -1,133 +1,179 @@
+/**
+ * TypeScript interfaces matching Rust response structs from csviewai.
+ *
+ * IMPORTANT: Tauri 2 serializes Rust snake_case fields as camelCase in JS.
+ * So Rust `file_id: String` arrives as `fileId` in TS.
+ * All interfaces here must use camelCase field names.
+ */
+
+// --- CSV commands ---
+
 export interface FileInfo {
-  file_id: string;
+  fileId: string;
   path: string;
-  row_count: number;
+  rowCount: number;
   columns: SchemaColumn[];
-  table_name: string;
+  tableName: string;
 }
 
 export interface SchemaColumn {
   index: number;
   name: string;
-  original_name: string;
+  originalName: string;
   kind: string;
-  nullable_pct: number;
-  unique_count: number;
-  sample_values: string[];
+  nullablePct: number;
+  uniqueCount: number;
+  sampleValues: string[];
 }
 
 export interface SchemaContext {
-  table_name: string;
+  tableName: string;
   columns: SchemaColumn[];
-  row_count: number;
-  sample_rows: string[][];
+  rowCount: number;
+  sampleRows: string[][];
 }
 
 export interface QueryResult {
   columns: string[];
   rows: (string | number | boolean | null)[][];
-  row_count: number;
+  rowCount: number;
   sql: string;
 }
+
+// --- Account ---
 
 export interface AccountStatus {
-  has_key: boolean;
+  hasApiKey: boolean;
+  provider: string;
   model: string;
+  availableModels: AvailableModel[];
 }
+
+export interface AvailableModel {
+  id: string;
+  name: string;
+  provider: string;
+  tier: string;
+  description: string;
+}
+
+// --- Feature 1: NL Query ---
 
 export interface NlQueryResult {
+  whereClause: string;
   sql: string;
-  explanation: string;
-  result: QueryResult;
+  columns: string[];
+  rows: (string | number | boolean | null)[][];
+  rowCount: number;
 }
 
+// --- Feature 2: Profile ---
+
 export interface ProfileReport {
-  id: string;
   markdown: string;
-  generated_at: string;
+  stats: unknown;
 }
+
+// --- Feature 3: Transform ---
 
 export interface TransformResult {
   expression: string;
-  column_name: string;
-  preview: string[];
+  columnName: string;
+  rowsUpdated: number;
 }
+
+// --- Feature 4: Anomaly ---
 
 export interface AnomalyReport {
-  anomalies: Anomaly[];
-  narrative: string;
+  markdown: string;
+  anomalies: AnomalyResult[];
 }
 
-export interface Anomaly {
+export interface AnomalyResult {
   row: number;
   column: string;
   value: string;
-  z_score: number;
+  zScore: number;
+  iqrFlag: boolean;
   reason: string;
 }
 
+// --- Feature 5: Grouping ---
+
 export interface GroupByReport {
+  markdown: string;
   sql: string;
-  result: QueryResult;
-  narrative: string;
+  columns: string[];
+  rows: (string | number | boolean | null)[][];
 }
+
+// --- Feature 6: Quality ---
 
 export interface QualityReport {
-  issues: QualityIssue[];
-  narrative: string;
-  summary: Record<string, number>;
+  markdown: string;
+  issues: QualityIssueSer[];
 }
 
-export interface QualityIssue {
+export interface QualityIssueSer {
   row: number;
   column: string;
-  issue_type: string;
+  issueType: string;
   value: string;
   suggestion: string | null;
 }
 
+// --- Feature 7: Chat ---
+
 export interface ChatSession {
-  id: string;
-  title: string | null;
-  created_at: string;
+  sessionId: string;
+  fileId: string;
+  createdAt: string;
 }
 
 export interface ChatResponse {
-  content: string;
-  sql_executed: string | null;
-  query_result: QueryResult | null;
+  sessionId: string;
+  message: string;
+  role: string;
 }
+
+// --- Feature 8: Report ---
 
 export interface Report {
-  id: string;
+  reportId: string;
   title: string;
   markdown: string;
-  generated_at: string;
 }
 
+// --- Feature 9: Join ---
+
 export interface JoinSuggestion {
-  left_key: string;
-  right_key: string;
-  join_type: string;
+  leftKey: string;
+  rightKey: string;
+  joinType: string;
   explanation: string;
 }
 
+// --- Feature 10: Compliance ---
+
 export interface ComplianceReport {
-  issues: ComplianceIssue[];
-  narrative: string;
+  markdown: string;
+  piiColumns: PiiColumn[];
 }
 
-export interface ComplianceIssue {
-  column: string;
-  pii_type: string;
-  count: number;
-  sample_values: string[];
+export interface PiiColumn {
+  columnName: string;
+  piiKind: string;
+  sampleValues: string[];
 }
+
+// --- Feature 11: Forecast ---
 
 export interface ForecastReport {
+  markdown: string;
   slope: number;
   intercept: number;
-  r_squared: number;
-  narrative: string;
-  predictions: [number, number][];
+  rSquared: number;
+  n: number;
+  xCol: string;
+  yCol: string;
 }

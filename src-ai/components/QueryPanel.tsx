@@ -18,7 +18,7 @@ function ResultTable({ result }: { result: QueryResult }) {
   return (
     <div className="query-result-wrap">
       <div className="query-result-meta">
-        {result.row_count} row{result.row_count === 1 ? "" : "s"} returned
+        {result.rowCount} row{result.rowCount === 1 ? "" : "s"} returned
       </div>
       <div className="query-result-scroll">
         <table className="query-result-table">
@@ -39,9 +39,9 @@ function ResultTable({ result }: { result: QueryResult }) {
             ))}
           </tbody>
         </table>
-        {result.row_count > maxRows && (
+        {result.rowCount > maxRows && (
           <div className="query-result-truncated">
-            Showing first {maxRows} of {result.row_count} rows.
+            Showing first {maxRows} of {result.rowCount} rows.
           </div>
         )}
       </div>
@@ -139,7 +139,7 @@ export function QueryPanel({ fileId, onApplyFilter, onProcessing }: QueryPanelPr
 
           {result && (
             <div className="query-results">
-              <div className="query-explanation">{result.explanation}</div>
+              <div className="query-explanation">{result.whereClause}</div>
 
               <div className="query-sql-block">
                 <div className="query-sql-header">
@@ -162,7 +162,7 @@ export function QueryPanel({ fileId, onApplyFilter, onProcessing }: QueryPanelPr
                 <pre><code>{result.sql}</code></pre>
               </div>
 
-              <ResultTable result={result.result} />
+              <ResultTable result={result} />
             </div>
           )}
         </>

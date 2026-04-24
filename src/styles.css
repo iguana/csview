@@ -667,6 +667,190 @@ input[type="search"]::-webkit-search-cancel-button {
   box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
+/* --- Frozen rows / columns --- */
+/* Frozen cells use sticky positioning + an opaque background so they stay
+ * visible above scrolling neighbours. We tint them slightly so the freeze
+ * boundary is discoverable, and add a subtle inner shadow on the trailing
+ * edge of the frozen pane (right edge for cols, bottom for rows). */
+.grid-cell.frozen-col,
+.grid-header-cell.frozen-col,
+.row-index-header.sticky-left,
+.row-index-cell.sticky-left {
+  background: var(--bg-elevated);
+}
+.grid-cell.frozen-col {
+  background: color-mix(in srgb, var(--bg-elevated) 88%, var(--accent) 6%);
+}
+.grid-row.frozen-row .grid-cell {
+  background: color-mix(in srgb, var(--bg-elevated) 86%, var(--accent) 8%);
+}
+.grid-row.frozen-row .grid-cell.frozen-col {
+  background: color-mix(in srgb, var(--bg-elevated) 80%, var(--accent) 12%);
+}
+.grid-row.frozen-row .row-index-cell {
+  background: var(--bg-elevated);
+}
+/* Right border on the last frozen column gets a slightly stronger color so
+ * the freeze line is visible at a glance. */
+.grid-cell.frozen-col + .grid-cell:not(.frozen-col),
+.grid-header-cell.frozen-col + .grid-header-cell:not(.frozen-col) {
+  border-left: 1px solid var(--border-strong);
+}
+/* Frozen-band wrapper sits below the header. When the band is empty we
+ * collapse it to zero so it doesn't push content. */
+.grid-frozen-band {
+  background: var(--bg-grid);
+  border-bottom: 1px solid var(--border-strong);
+}
+
+/* --- Hidden indicator pill on the row-index header --- */
+.row-index-header .hidden-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 16px;
+  padding: 0 4px;
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--badge-text);
+  background: var(--accent);
+  border-radius: 999px;
+  cursor: pointer;
+  letter-spacing: 0.3px;
+}
+.row-index-header .hidden-pill:hover {
+  background: var(--accent-strong);
+}
+
+/* --- Context menu --- */
+.ctxmenu {
+  min-width: 220px;
+  max-width: 320px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow:
+    0 8px 30px -8px rgba(0, 0, 0, 0.5),
+    0 2px 8px -2px rgba(0, 0, 0, 0.35);
+  z-index: 50;
+  font-size: 12px;
+  color: var(--text);
+  user-select: none;
+}
+.ctxmenu-section {
+  padding: 4px 10px 6px;
+}
+.ctxmenu-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ctxmenu-divider {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+.ctxmenu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 80ms;
+}
+.ctxmenu-item:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.ctxmenu-item:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.ctxmenu-item.destructive {
+  color: var(--danger);
+}
+.ctxmenu-item.destructive:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 22%, transparent);
+}
+.ctxmenu-kbd {
+  margin-left: auto;
+  font-size: 10px;
+  font-family: -apple-system, BlinkMacSystemFont, monospace;
+  color: var(--text-dim);
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+/* --- Confirm modal --- */
+.confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  background: color-mix(in srgb, #000 45%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+  backdrop-filter: blur(2px);
+}
+.confirm-modal {
+  min-width: 320px;
+  max-width: 460px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  padding: 18px 18px 14px;
+  box-shadow:
+    0 20px 60px -10px rgba(0, 0, 0, 0.6),
+    0 6px 18px -6px rgba(0, 0, 0, 0.4);
+}
+.confirm-message {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.confirm-detail {
+  margin: 0 0 14px;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+.confirm-buttons {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+.confirm-buttons button {
+  min-width: 78px;
+  padding: 6px 14px;
+  font-size: 12px;
+}
+.confirm-buttons button.danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--badge-text);
+  font-weight: 600;
+}
+.confirm-buttons button.danger:hover {
+  background: color-mix(in srgb, var(--danger) 85%, white);
+  border-color: color-mix(in srgb, var(--danger) 85%, white);
+}
+
 /* --- Status bar --- */
 .statusbar {
   display: flex;

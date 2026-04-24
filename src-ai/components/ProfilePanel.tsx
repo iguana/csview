@@ -100,9 +100,6 @@ export function ProfilePanel({ fileId, onProcessing }: ProfilePanelProps) {
 
           {report && (
             <div className="profile-report">
-              <div className="profile-meta">
-                Generated {new Date(report.generated_at).toLocaleString()}
-              </div>
               <SimpleMarkdown content={report.markdown} />
             </div>
           )}

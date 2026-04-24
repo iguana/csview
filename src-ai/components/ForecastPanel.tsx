@@ -13,78 +13,6 @@ function errMsg(e: unknown): string {
   try { return JSON.stringify(e); } catch { return String(e); }
 }
 
-// Simple CSS-based sparkline / line chart
-function Sparkline({ predictions }: { predictions: [number, number][] }) {
-  if (predictions.length < 2) return null;
-
-  const xs = predictions.map(([x]) => x);
-  const ys = predictions.map(([, y]) => y);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
-  const rangeX = maxX - minX || 1;
-  const rangeY = maxY - minY || 1;
-
-  const W = 300;
-  const H = 80;
-  const PAD = 6;
-
-  const toSvgX = (x: number) =>
-    PAD + ((x - minX) / rangeX) * (W - 2 * PAD);
-  const toSvgY = (y: number) =>
-    PAD + (1 - (y - minY) / rangeY) * (H - 2 * PAD);
-
-  const points = predictions
-    .map(([x, y]) => `${toSvgX(x).toFixed(1)},${toSvgY(y).toFixed(1)}`)
-    .join(" ");
-
-  const areaPoints =
-    `${toSvgX(xs[0]).toFixed(1)},${H} ` +
-    points +
-    ` ${toSvgX(xs[xs.length - 1]).toFixed(1)},${H}`;
-
-  return (
-    <div className="sparkline-wrap">
-      <svg
-        className="sparkline"
-        viewBox={`0 0 ${W} ${H}`}
-        width={W}
-        height={H}
-        aria-label="Forecast chart"
-        role="img"
-      >
-        <polygon
-          points={areaPoints}
-          fill="var(--accent)"
-          opacity={0.15}
-        />
-        <polyline
-          points={points}
-          fill="none"
-          stroke="var(--accent)"
-          strokeWidth={1.5}
-          strokeLinejoin="round"
-          strokeLinecap="round"
-        />
-        {/* First and last point dots */}
-        {[predictions[0], predictions[predictions.length - 1]].map(([x, y], i) => (
-          <circle
-            key={i}
-            cx={toSvgX(x)}
-            cy={toSvgY(y)}
-            r={3}
-            fill="var(--accent)"
-          />
-        ))}
-      </svg>
-      <div className="sparkline-labels">
-        <span>{xs[0]}</span>
-        <span>{xs[xs.length - 1]}</span>
-      </div>
-    </div>
-  );
-}
 
 export interface ForecastPanelProps {
   fileId: string | null;
@@ -116,12 +44,12 @@ export function ForecastPanel({ fileId, columns, onProcessing }: ForecastPanelPr
   }, [fileId, xCol, yCol, onProcessing]);
 
   const r2Display = report
-    ? `${(report.r_squared * 100).toFixed(1)}%`
+    ? `${(report.rSquared * 100).toFixed(1)}%`
     : null;
   const r2Quality = report
-    ? report.r_squared >= 0.8
+    ? report.rSquared >= 0.8
       ? "good"
-      : report.r_squared >= 0.5
+      : report.rSquared >= 0.5
         ? "moderate"
         : "poor"
     : null;
@@ -210,13 +138,9 @@ export function ForecastPanel({ fileId, columns, onProcessing }: ForecastPanelPr
                 </div>
               </div>
 
-              {report.predictions.length > 0 && (
-                <Sparkline predictions={report.predictions} />
-              )}
-
-              {report.narrative && (
+              {report.markdown && (
                 <div className="forecast-narrative">
-                  <SimpleMarkdown content={report.narrative} />
+                  <SimpleMarkdown content={report.markdown} />
                 </div>
               )}
             </div>

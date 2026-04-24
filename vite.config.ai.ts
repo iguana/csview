@@ -11,6 +11,9 @@ export default defineConfig({
   build: {
     outDir: "dist-ai",
     target: "safari13",
+    rollupOptions: {
+      input: resolve(__dirname, "index-ai.html"),
+    },
   },
   resolve: {
     alias: {

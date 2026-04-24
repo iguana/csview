@@ -22,7 +22,8 @@ use csview_engine::sqlite_store::SchemaContext;
 use csview_engine::stats_extended::{self, AnomalyResult, ExtendedColumnStats};
 
 use crate::commands_csv::CommandError;
-use crate::llm::{ChatMessage, LlmClient, LlmError};
+use crate::llm::client::{available_models, ChatMessage, LlmClient, Provider};
+use crate::llm::types::LlmError;
 use crate::llm::prompts;
 use crate::state::AiAppState;
 
@@ -33,7 +34,18 @@ use crate::state::AiAppState;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AccountStatus {
     pub has_api_key: bool,
+    pub provider: String,
     pub model: String,
+    pub available_models: Vec<AvailableModel>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AvailableModel {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub tier: String,
+    pub description: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -256,22 +268,30 @@ fn read_all_rows(state: &AiAppState, file_id: &str) -> Result<(Vec<ColumnMeta>, 
 // Account commands
 // ---------------------------------------------------------------------------
 
-/// Store an Anthropic API key and initialise the LLM client.
+/// Store an API key + provider + model and initialise the LLM client.
 #[tauri::command]
 pub async fn set_api_key(
     state: State<'_, AiAppState>,
+    provider: String,
     key: String,
+    model: String,
 ) -> Result<(), CommandError> {
     if key.trim().is_empty() {
         return Err(CommandError::InvalidArg("API key must not be empty".into()));
     }
-    let client = LlmClient::new(key.clone());
+    let prov = match provider.to_lowercase().as_str() {
+        "openai" => Provider::OpenAI,
+        "google" => Provider::Google,
+        "anthropic" => Provider::Anthropic,
+        _ => return Err(CommandError::InvalidArg(format!("unknown provider: {provider}"))),
+    };
+    let client = LlmClient::new(prov, key.clone(), model.clone());
 
     {
         let db = state.app_db.lock();
         db.execute(
-            "INSERT INTO account (api_key) VALUES (?1)",
-            rusqlite::params![key],
+            "INSERT OR REPLACE INTO account (id, api_key, model) VALUES (1, ?1, ?2)",
+            rusqlite::params![format!("{provider}:{key}"), model],
         )
         .map_err(|e| CommandError::Sqlite(e.to_string()))?;
     }
@@ -280,14 +300,56 @@ pub async fn set_api_key(
     Ok(())
 }
 
-/// Check whether an API key is currently configured.
+/// Check whether an API key is currently configured and return available models.
 #[tauri::command]
 pub fn get_account_status(state: State<'_, AiAppState>) -> Result<AccountStatus, CommandError> {
-    let has_api_key = state.llm.lock().is_some();
+    let guard = state.llm.lock();
+    let (has_api_key, provider, model) = match guard.as_ref() {
+        Some(client) => (true, format!("{}", client.provider()), client.model().to_string()),
+        None => (false, String::new(), String::new()),
+    };
+    drop(guard);
     Ok(AccountStatus {
         has_api_key,
-        model: "claude-sonnet-4-20250514".to_string(),
+        provider,
+        model,
+        available_models: available_models()
+            .into_iter()
+            .map(|m| AvailableModel {
+                id: m.id,
+                name: m.name,
+                provider: format!("{}", m.provider),
+                tier: format!("{:?}", m.tier).to_lowercase(),
+                description: m.description,
+            })
+            .collect(),
     })
+}
+
+/// Auto-detect API keys from environment variables and configure the client.
+/// Called on startup from lib.rs setup().
+pub fn auto_detect_keys(state: &AiAppState) {
+    // Try env vars in order of preference
+    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+        if !key.is_empty() {
+            let client = LlmClient::new(Provider::Anthropic, key, "claude-sonnet-4-20250514".into());
+            *state.llm.lock() = Some(client);
+            return;
+        }
+    }
+    if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+        if !key.is_empty() {
+            let client = LlmClient::new(Provider::OpenAI, key, "gpt-4.1".into());
+            *state.llm.lock() = Some(client);
+            return;
+        }
+    }
+    if let Ok(key) = std::env::var("GEMINI_API_KEY") {
+        if !key.is_empty() {
+            let client = LlmClient::new(Provider::Google, key, "gemini-2.5-flash".into());
+            *state.llm.lock() = Some(client);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

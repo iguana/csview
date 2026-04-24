@@ -108,7 +108,7 @@ export function App() {
   // Check for existing API key on mount
   useEffect(() => {
     aiApi.getAccountStatus().then((s) => {
-      setApiKeySet(s.has_key);
+      setApiKeySet(s.hasApiKey);
     }).catch(() => {
       // backend may not be running in dev
     });
@@ -158,8 +158,8 @@ export function App() {
         setActiveCell(null);
         historyRef.current.clear();
         bumpHistory();
-        const c = ensureCache(info.file_id);
-        const initialCount = Math.min(info.row_count, c.pageSize);
+        const c = ensureCache(info.fileId);
+        const initialCount = Math.min(info.rowCount, c.pageSize);
         if (initialCount > 0) {
           await c.ensure(0, initialCount);
         }
@@ -236,7 +236,7 @@ export function App() {
     const c = cacheRef.current;
     const cached = c?.get(row);
     if (cached) return cached[col] ?? "";
-    const result = await csvApi.readRange(info.file_id, row, 1);
+    const result = await csvApi.readRange(info.fileId, row, 1);
     return result.rows[0]?.[col] != null ? String(result.rows[0][col]) : "";
   }, []);
 
@@ -247,7 +247,7 @@ export function App() {
       if (!info) return;
       const colName = info.columns[col]?.name ?? String(col);
       // rowid: use row index as rowid (1-based in SQLite)
-      await csvApi.updateCell(info.file_id, row + 1, colName, value);
+      await csvApi.updateCell(info.fileId, row + 1, colName, value);
       cacheRef.current?.invalidate();
       setCacheVersion((v) => v + 1);
     },
@@ -280,7 +280,7 @@ export function App() {
       if (!info) return;
       try {
         const rowids = rows.map((r) => r + 1); // 1-based
-        await csvApi.deleteRows(info.file_id, rowids);
+        await csvApi.deleteRows(info.fileId, rowids);
         cacheRef.current?.invalidate();
         setCacheVersion((v) => v + 1);
         const updatedInfo = await csvApi.openCsv(info.path);
@@ -295,7 +295,50 @@ export function App() {
             setCacheVersion((v) => v + 1);
           },
           redo: async () => {
-            await csvApi.deleteRows(info.file_id, rowids);
+            await csvApi.deleteRows(info.fileId, rowids);
+            cacheRef.current?.invalidate();
+            setCacheVersion((v) => v + 1);
+          },
+        });
+        bumpHistory();
+      } catch (e) {
+        setError(errMsg(e));
+      }
+    },
+    [bumpHistory],
+  );
+
+  // --- Delete column ---
+  const onDeleteColumn = useCallback(
+    async (column: number) => {
+      const info = fileInfoRef.current;
+      if (!info) return;
+      try {
+        await csvApi.deleteColumn(info.fileId, column);
+        // Re-open to refresh the schema (column list is part of FileInfo).
+        const refreshed = await csvApi.openCsv(info.path);
+        setFileInfo(refreshed);
+        cacheRef.current?.invalidate();
+        setCacheVersion((v) => v + 1);
+        setActiveCell((c) =>
+          c && c.col >= refreshed.columns.length
+            ? { row: c.row, col: Math.max(0, refreshed.columns.length - 1) }
+            : c,
+        );
+        // SQLite-backed undo just re-opens the file (matches delete-rows
+        // semantics). Push a minimal history entry so users see the change.
+        historyRef.current.push({
+          label: `Delete column`,
+          undo: async () => {
+            const r = await csvApi.openCsv(info.path);
+            setFileInfo(r);
+            cacheRef.current?.invalidate();
+            setCacheVersion((v) => v + 1);
+          },
+          redo: async () => {
+            await csvApi.deleteColumn(info.fileId, column);
+            const r = await csvApi.openCsv(info.path);
+            setFileInfo(r);
             cacheRef.current?.invalidate();
             setCacheVersion((v) => v + 1);
           },
@@ -313,7 +356,7 @@ export function App() {
     const info = fileInfoRef.current;
     if (!info) return;
     try {
-      await csvApi.saveCsv(info.file_id);
+      await csvApi.saveCsv(info.fileId);
     } catch (e) {
       setError(errMsg(e));
     }
@@ -333,7 +376,7 @@ export function App() {
         ],
       });
       if (!target) return;
-      await csvApi.saveCsvAs(info.file_id, target);
+      await csvApi.saveCsvAs(info.fileId, target);
     } catch (e) {
       setError(errMsg(e));
     }
@@ -383,7 +426,7 @@ export function App() {
         for (let dc = 0; dc < grid[dr].length; dc++) {
           const r = activeCell.row + dr;
           const c = activeCell.col + dc;
-          if (r >= info.row_count || c >= info.columns.length) continue;
+          if (r >= info.rowCount || c >= info.columns.length) continue;
           const prev = await readCell(r, c);
           changes.push({ row: r, col: c, value: grid[dr][dc], prev });
         }
@@ -420,6 +463,68 @@ export function App() {
     bumpHistory();
   }, [bumpHistory]);
 
+  // --- Menu events from the native menu bar ---
+  // Display-affecting actions (freeze, hide, autosize) dispatch into the
+  // grid imperatively via gridRef. Backend-affecting actions (delete row /
+  // column) route through the App so the modal + history stack get involved.
+  useEffect(() => {
+    const off = listen<string>("menu-action", (event) => {
+      const id = event.payload;
+      switch (id) {
+        case "save":
+          void doSave();
+          return;
+        case "save_as":
+          void doSaveAs();
+          return;
+        case "undo":
+          void doUndo();
+          return;
+        case "redo":
+          void doRedo();
+          return;
+        case "delete_row":
+          if (activeCell) gridRef.current?.requestDeleteRows([activeCell.row]);
+          return;
+        case "delete_column":
+          if (activeCell != null)
+            gridRef.current?.requestDeleteColumn(activeCell.col);
+          return;
+        case "freeze_rows_to_cursor":
+          if (activeCell != null)
+            gridRef.current?.setFrozenRows(activeCell.row + 1);
+          return;
+        case "freeze_columns_to_cursor":
+          if (activeCell != null)
+            gridRef.current?.setFrozenColumns(activeCell.col + 1);
+          return;
+        case "unfreeze_all":
+          gridRef.current?.unfreezeAll();
+          return;
+        case "hide_row":
+          if (activeCell != null) gridRef.current?.hideRow(activeCell.row);
+          return;
+        case "hide_column":
+          if (activeCell != null) gridRef.current?.hideColumn(activeCell.col);
+          return;
+        case "show_all_hidden":
+          gridRef.current?.showAllHidden();
+          return;
+        case "autosize_column":
+          if (activeCell != null)
+            gridRef.current?.autoSizeColumn(activeCell.col);
+          return;
+        case "autosize_all_columns":
+          gridRef.current?.autoSizeAllColumns();
+          return;
+      }
+    });
+    return () => {
+      void off.then((fn) => fn());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doSave, doSaveAs, doUndo, doRedo, activeCell]);
+
   // --- Sidebar resize ---
   const startSidebarResize = useCallback(
     (e: React.MouseEvent) => {
@@ -447,7 +552,7 @@ export function App() {
 
   // --- AI event handlers ---
   const handleAccountStatus = useCallback((status: AccountStatus) => {
-    setApiKeySet(status.has_key);
+    setApiKeySet(status.hasApiKey);
   }, []);
 
   const handleJumpToRow = useCallback((row: number) => {
@@ -470,8 +575,8 @@ export function App() {
       try {
         // Execute the transform as a SQL query to add the derived column
         await csvApi.queryData(
-          info.file_id,
-          `ALTER TABLE "${info.table_name}" ADD COLUMN "${columnName}" TEXT GENERATED ALWAYS AS (${result.expression})`,
+          info.fileId,
+          `ALTER TABLE "${info.tableName}" ADD COLUMN "${columnName}" TEXT GENERATED ALWAYS AS (${result.expression})`,
         );
         // Refresh file info
         const refreshed = await csvApi.openCsv(info.path);
@@ -489,8 +594,8 @@ export function App() {
 
   const handleJoinComplete = useCallback((result: FileInfo) => {
     setFileInfo(result);
-    const c = ensureCache(result.file_id);
-    void c.ensure(0, Math.min(result.row_count, c.pageSize));
+    const c = ensureCache(result.fileId);
+    void c.ensure(0, Math.min(result.rowCount, c.pageSize));
     setCacheVersion((v) => v + 1);
   }, [ensureCache]);
 
@@ -560,7 +665,7 @@ export function App() {
       setSortKey(newKey);
       // Re-sort via query — refresh cache after sort
       const orderBy = `"${colName}" ${k.direction.toUpperCase()}`;
-      csvApi.readRange(fileInfo.file_id, 0, 0, orderBy).then(() => {
+      csvApi.readRange(fileInfo.fileId, 0, 0, orderBy).then(() => {
         cacheRef.current?.invalidate();
         setCacheVersion((v) => v + 1);
       }).catch((e: unknown) => setError(errMsg(e)));
@@ -591,7 +696,7 @@ export function App() {
         {fileInfo && (
           <div className="titlebar-stats" data-testid="titlebar-stats">
             <span className="stat-pill">
-              <span className="stat-num">{formatCount(fileInfo.row_count)}</span>
+              <span className="stat-num">{formatCount(fileInfo.rowCount)}</span>
               <span className="stat-unit">rows</span>
             </span>
             <span className="stat-pill">
@@ -756,7 +861,7 @@ export function App() {
               <DataGrid
                 ref={gridRef}
                 columns={columns}
-                rowCount={fileInfo.row_count}
+                rowCount={fileInfo.rowCount}
                 sortKeys={sortKeys}
                 onSortChange={onSortChange}
                 cache={cache}
@@ -772,6 +877,7 @@ export function App() {
                 onCut={(cells) => void onCut(cells)}
                 onPaste={() => void onPaste()}
                 onDeleteRows={(rows) => void onDeleteRows(rows)}
+                onDeleteColumn={(col) => void onDeleteColumn(col)}
                 rowHeight={rowHeight}
                 jumpToRow={jumpToRow}
               />
@@ -804,7 +910,7 @@ export function App() {
               <div className="spacer" style={{ flex: 1 }} />
               <span>
                 {formatBytes(0)} ·{" "}
-                {fileInfo.row_count.toLocaleString()} rows ·{" "}
+                {fileInfo.rowCount.toLocaleString()} rows ·{" "}
                 {fileInfo.columns.length} cols
               </span>
             </div>

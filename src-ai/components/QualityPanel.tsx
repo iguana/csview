@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { aiApi } from "../lib/api-ai";
-import type { QualityIssue, QualityReport } from "../lib/types-ai";
+import type { QualityIssueSer, QualityReport } from "../lib/types-ai";
 import { SimpleMarkdown } from "./SimpleMarkdown";
 
 function errMsg(e: unknown): string {
@@ -21,14 +21,14 @@ function issueSeverity(type: string): "high" | "medium" | "low" {
   return "low";
 }
 
-function IssueRow({ issue }: { issue: QualityIssue }) {
-  const sev = issueSeverity(issue.issue_type);
+function IssueRow({ issue }: { issue: QualityIssueSer }) {
+  const sev = issueSeverity(issue.issueType);
   return (
     <tr className={`quality-issue-row severity-${sev}`}>
       <td className="issue-row-num">{issue.row + 1}</td>
       <td>{issue.column}</td>
       <td>
-        <span className={`issue-badge severity-${sev}`}>{issue.issue_type}</span>
+        <span className={`issue-badge severity-${sev}`}>{issue.issueType}</span>
       </td>
       <td className="issue-value" title={issue.value}>{issue.value}</td>
       <td className="issue-suggestion">
@@ -106,11 +106,16 @@ export function QualityPanel({ fileId, onProcessing }: QualityPanelProps) {
 
           {report && (
             <div className="quality-results">
-              {Object.keys(report.summary).length > 0 && (
+              {report.issues.length > 0 && (
                 <div className="quality-summary">
                   <div className="quality-summary-title">Issue Summary</div>
                   <div className="quality-summary-grid">
-                    {Object.entries(report.summary).map(([type, count]) => (
+                    {Object.entries(
+                      report.issues.reduce<Record<string, number>>((acc, issue) => {
+                        acc[issue.issueType] = (acc[issue.issueType] ?? 0) + 1;
+                        return acc;
+                      }, {})
+                    ).map(([type, count]) => (
                       <div
                         key={type}
                         className={`quality-summary-chip severity-${issueSeverity(type)}`}
@@ -151,9 +156,9 @@ export function QualityPanel({ fileId, onProcessing }: QualityPanelProps) {
                 </div>
               )}
 
-              {report.narrative && (
+              {report.markdown && (
                 <div className="quality-narrative">
-                  <SimpleMarkdown content={report.narrative} />
+                  <SimpleMarkdown content={report.markdown} />
                 </div>
               )}
             </div>

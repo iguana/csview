@@ -35,7 +35,7 @@ export function TransformPanel({ fileId, onProcessing, onApply }: TransformPanel
     try {
       const r = await aiApi.nlTransform(fileId, q);
       setResult(r);
-      setColumnName(r.column_name);
+      setColumnName(r.columnName);
     } catch (e) {
       setError(errMsg(e));
     } finally {
@@ -48,8 +48,6 @@ export function TransformPanel({ fileId, onProcessing, onApply }: TransformPanel
     if (!result || !columnName.trim()) return;
     onApply?.(result, columnName.trim());
   }, [result, columnName, onApply]);
-
-  const PREVIEW_LIMIT = 10;
 
   return (
     <div className="ai-panel transform-panel">
@@ -121,15 +119,7 @@ export function TransformPanel({ fileId, onProcessing, onApply }: TransformPanel
 
               <div className="transform-preview-wrap">
                 <div className="transform-preview-label">
-                  Preview (first {Math.min(result.preview.length, PREVIEW_LIMIT)} values)
-                </div>
-                <div className="transform-preview">
-                  {result.preview.slice(0, PREVIEW_LIMIT).map((val, i) => (
-                    <div key={i} className="transform-preview-row">
-                      <span className="transform-preview-idx">{i + 1}</span>
-                      <span className="transform-preview-val">{val}</span>
-                    </div>
-                  ))}
+                  {result.rowsUpdated} row{result.rowsUpdated === 1 ? "" : "s"} will be updated
                 </div>
               </div>
 

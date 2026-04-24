@@ -422,9 +422,9 @@ impl SqliteStore {
     ) -> Result<QueryResult, SqliteError> {
         let sql = match order_by {
             Some(ob) => format!(
-                "SELECT rowid, * FROM data ORDER BY {ob} LIMIT {limit} OFFSET {offset}"
+                "SELECT * FROM data ORDER BY {ob} LIMIT {limit} OFFSET {offset}"
             ),
-            None => format!("SELECT rowid, * FROM data LIMIT {limit} OFFSET {offset}"),
+            None => format!("SELECT * FROM data LIMIT {limit} OFFSET {offset}"),
         };
         self.execute_query(&sql)
     }
@@ -593,6 +593,36 @@ impl SqliteStore {
         let update_sql = format!("UPDATE data SET {qname} = ({sql_expr});");
         self.conn.execute_batch(&update_sql)?;
         Ok(())
+    }
+
+    /// Drop a column by its zero-based position in `self.columns`.
+    ///
+    /// Uses SQLite's `ALTER TABLE … DROP COLUMN` (available from SQLite 3.35).
+    /// Updates the in-memory schema (`columns`, `original_headers`) so future
+    /// queries and exports stay consistent.
+    pub fn delete_column(&mut self, col_index: usize) -> Result<String, SqliteError> {
+        if col_index >= self.columns.len() {
+            return Err(SqliteError::InvalidQuery(format!(
+                "column index {col_index} out of range"
+            )));
+        }
+        if self.columns.len() <= 1 {
+            return Err(SqliteError::InvalidQuery(
+                "cannot delete the only remaining column".into(),
+            ));
+        }
+        let removed = self.columns[col_index].clone();
+        let qname = quote_ident(&removed.name);
+        let sql = format!("ALTER TABLE data DROP COLUMN {qname};");
+        self.conn.execute_batch(&sql)?;
+        // Mirror the schema change in the in-memory metadata.
+        self.columns.remove(col_index);
+        self.original_headers.remove(col_index);
+        // Re-index downstream entries so callers can continue to use index().
+        for c in self.columns.iter_mut().skip(col_index) {
+            c.index = c.index.saturating_sub(1);
+        }
+        Ok(removed.name)
     }
 
     // -----------------------------------------------------------------------

@@ -648,7 +648,7 @@ dependencies = [
 
 [[package]]
 name = "csview"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "csv",
@@ -687,7 +687,7 @@ dependencies = [
 
 [[package]]
 name = "csviewai"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",

@@ -79,7 +79,7 @@ export function AISidebar({
   onTransformApply,
   onJoinComplete,
 }: AISidebarProps) {
-  const fileId = fileInfo?.file_id ?? null;
+  const fileId = fileInfo?.fileId ?? null;
   const columns = fileInfo?.columns.map((c) => c.name) ?? [];
 
   const requiresKey = activeTab !== "settings" && !apiKeySet;

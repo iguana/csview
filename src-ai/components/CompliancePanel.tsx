@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { aiApi } from "../lib/api-ai";
-import type { ComplianceIssue, ComplianceReport } from "../lib/types-ai";
+import type { PiiColumn, ComplianceReport } from "../lib/types-ai";
 import { SimpleMarkdown } from "./SimpleMarkdown";
 
 function errMsg(e: unknown): string {
@@ -30,23 +30,22 @@ function piiSeverity(piiType: string): "high" | "medium" | "low" {
   return PII_SEVERITY[key] ?? "medium";
 }
 
-function ComplianceIssueCard({ issue }: { issue: ComplianceIssue }) {
-  const sev = piiSeverity(issue.pii_type);
+function ComplianceIssueCard({ issue }: { issue: PiiColumn }) {
+  const sev = piiSeverity(issue.piiKind);
   const [expanded, setExpanded] = useState(false);
 
   return (
     <div className={`compliance-issue-card severity-${sev}`}>
       <div className="compliance-issue-header" onClick={() => setExpanded((v) => !v)}>
-        <span className={`issue-badge severity-${sev}`}>{issue.pii_type}</span>
-        <span className="compliance-col">{issue.column}</span>
-        <span className="compliance-count">{issue.count} occurrence{issue.count === 1 ? "" : "s"}</span>
+        <span className={`issue-badge severity-${sev}`}>{issue.piiKind}</span>
+        <span className="compliance-col">{issue.columnName}</span>
         <span className="compliance-expand">{expanded ? "▲" : "▼"}</span>
       </div>
       {expanded && (
         <div className="compliance-samples">
           <div className="compliance-samples-label">Sample values</div>
           <div className="compliance-samples-list">
-            {issue.sample_values.map((v, i) => (
+            {issue.sampleValues.map((v, i) => (
               <code key={i} className="compliance-sample">{v}</code>
             ))}
           </div>
@@ -82,10 +81,10 @@ export function CompliancePanel({ fileId, onProcessing }: CompliancePanelProps) 
     }
   }, [fileId, onProcessing]);
 
-  // Group issues by PII type
+  // Group columns by PII kind
   const grouped = report
-    ? report.issues.reduce<Record<string, ComplianceIssue[]>>((acc, issue) => {
-        const key = issue.pii_type;
+    ? report.piiColumns.reduce<Record<string, PiiColumn[]>>((acc, issue) => {
+        const key = issue.piiKind;
         if (!acc[key]) acc[key] = [];
         acc[key].push(issue);
         return acc;
@@ -134,27 +133,27 @@ export function CompliancePanel({ fileId, onProcessing }: CompliancePanelProps) 
 
           {report && (
             <div className="compliance-results">
-              {report.issues.length === 0 ? (
+              {report.piiColumns.length === 0 ? (
                 <div className="ai-empty-state">
                   No PII detected in this dataset.
                 </div>
               ) : (
                 <>
                   <div className="compliance-summary">
-                    {report.issues.length} PII field{report.issues.length === 1 ? "" : "s"} found
+                    {report.piiColumns.length} PII field{report.piiColumns.length === 1 ? "" : "s"} found
                     across {Object.keys(grouped).length} type{Object.keys(grouped).length === 1 ? "" : "s"}
                   </div>
                   <div className="compliance-issues">
-                    {report.issues.map((issue, i) => (
+                    {report.piiColumns.map((issue, i) => (
                       <ComplianceIssueCard key={i} issue={issue} />
                     ))}
                   </div>
                 </>
               )}
 
-              {report.narrative && (
+              {report.markdown && (
                 <div className="compliance-narrative">
-                  <SimpleMarkdown content={report.narrative} />
+                  <SimpleMarkdown content={report.markdown} />
                 </div>
               )}
             </div>

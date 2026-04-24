@@ -37,6 +37,21 @@ export const api = {
   deleteRows(fileId: string, rows: number[]) {
     return invoke<CsvMetadata>("delete_rows", { fileId, rows });
   },
+  deleteColumn(fileId: string, column: number) {
+    return invoke<{
+      metadata: CsvMetadata;
+      removed_name: string;
+      removed_values: string[];
+    }>("delete_column", { fileId, column });
+  },
+  insertColumn(
+    fileId: string,
+    at: number,
+    name: string,
+    values: string[],
+  ) {
+    return invoke<CsvMetadata>("insert_column", { fileId, at, name, values });
+  },
   save(fileId: string) {
     return invoke<CsvMetadata>("save_csv", { fileId });
   },

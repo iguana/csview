@@ -41,6 +41,16 @@ export class RangeCache {
     return page[row - pageIdx * this.pageSize];
   }
 
+  /** Iterate every row currently held in cache, in arbitrary page order. */
+  *loadedRows(): IterableIterator<{ index: number; row: string[] }> {
+    for (const [pageIdx, page] of this.pages) {
+      const start = pageIdx * this.pageSize;
+      for (let i = 0; i < page.length; i++) {
+        yield { index: start + i, row: page[i] };
+      }
+    }
+  }
+
   async ensure(startRow: number, endRow: number): Promise<void> {
     const firstPage = Math.floor(startRow / this.pageSize);
     const lastPage = Math.floor(Math.max(startRow, endRow - 1) / this.pageSize);

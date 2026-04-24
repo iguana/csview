@@ -601,6 +601,93 @@ impl CsvFile {
         Ok(())
     }
 
+    /// Delete a column. Returns the removed header name plus the column's
+    /// values (in original storage order) so callers can restore on undo.
+    pub fn delete_column(&mut self, col: usize) -> Result<(String, Vec<String>)> {
+        if col >= self.column_count() {
+            return Err(EngineError::OutOfRange);
+        }
+        if self.column_count() == 1 {
+            // Refuse to delete the only column — the engine treats a 0-column
+            // file as empty and would error out on the next read.
+            return Err(EngineError::OutOfRange);
+        }
+        let removed_name = self.headers.get(col).cloned().unwrap_or_default();
+        let rows = self.rows_mut()?;
+        let mut removed_values: Vec<String> = Vec::with_capacity(rows.len());
+        for row in rows.iter_mut() {
+            if col < row.len() {
+                removed_values.push(row.remove(col));
+            } else {
+                removed_values.push(String::new());
+            }
+        }
+        // Update headers + columns and re-index downstream column entries.
+        self.headers.remove(col);
+        self.columns.remove(col);
+        for c in self.columns.iter_mut().skip(col) {
+            c.index = c.index.saturating_sub(1);
+        }
+        // Drop any active sort that referenced columns at-or-after the
+        // deleted index — stale columns would point past the new schema.
+        if let Some(_order) = &self.sort_order {
+            // We don't track which columns the sort uses here, but the sort
+            // permutation is over rows only, so it's still valid.
+        }
+        self.dirty = true;
+        Ok((removed_name, removed_values))
+    }
+
+    /// Insert a column at `at` with `name` and per-row `values`. Used to
+    /// restore a deleted column on undo. `values.len()` must equal `row_count`.
+    pub fn insert_column(
+        &mut self,
+        at: usize,
+        name: String,
+        values: Vec<String>,
+    ) -> Result<()> {
+        if at > self.column_count() {
+            return Err(EngineError::OutOfRange);
+        }
+        let rows = self.rows_mut()?;
+        if values.len() != rows.len() {
+            return Err(EngineError::OutOfRange);
+        }
+        for (row, v) in rows.iter_mut().zip(values.into_iter()) {
+            // Pad short rows so the insert lands at the right column index.
+            while row.len() < at {
+                row.push(String::new());
+            }
+            row.insert(at, v);
+        }
+        self.headers.insert(at, name.clone());
+        // Re-infer the kind for the restored column from the in-memory rows.
+        let sample_rows: Vec<Vec<String>> = match &self.storage {
+            Storage::InMemory { rows } => rows.iter().take(SAMPLE_ROWS).cloned().collect(),
+            _ => unreachable!(),
+        };
+        // Build a one-element header list to call into infer_columns.
+        let new_meta = infer_columns(&[name.clone()], &sample_rows.iter().map(|r| {
+            r.get(at).cloned().map(|v| vec![v]).unwrap_or_else(|| vec![String::new()])
+        }).collect::<Vec<_>>())
+            .into_iter()
+            .next()
+            .unwrap_or(ColumnMeta {
+                index: at,
+                name,
+                kind: ColumnKind::String,
+            });
+        // Push at position `at`, then re-index everything downstream.
+        let mut meta = new_meta;
+        meta.index = at;
+        self.columns.insert(at, meta);
+        for c in self.columns.iter_mut().skip(at + 1) {
+            c.index += 1;
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
     /// Write the current (possibly edited, possibly sorted) data to `path`.
     /// If `path` matches `self.path`, updates in place and clears the dirty flag.
     pub fn save_to(&mut self, path: &Path) -> Result<()> {
@@ -1179,6 +1266,41 @@ mod tests {
         let rows = csv.read_range(0, 2).unwrap();
         assert_eq!(rows[0], vec!["9", "zz"]);
         assert_eq!(rows[1], vec!["1", "x"]);
+    }
+
+    #[test]
+    fn delete_column_removes_and_returns_values() {
+        let f = write_csv_named("a,b,c\n1,x,foo\n2,y,bar\n3,z,baz\n", "csv");
+        let mut csv = CsvFile::open(f.path()).unwrap();
+        let (name, vals) = csv.delete_column(1).unwrap();
+        assert_eq!(name, "b");
+        assert_eq!(vals, vec!["x", "y", "z"]);
+        assert_eq!(csv.column_count(), 2);
+        assert_eq!(csv.headers, vec!["a", "c"]);
+        assert!(csv.dirty);
+        let rows = csv.read_range(0, 3).unwrap();
+        assert_eq!(rows[0], vec!["1", "foo"]);
+        assert_eq!(rows[2], vec!["3", "baz"]);
+    }
+
+    #[test]
+    fn delete_then_insert_column_round_trips() {
+        let f = write_csv_named("a,b,c\n1,x,foo\n2,y,bar\n", "csv");
+        let mut csv = CsvFile::open(f.path()).unwrap();
+        let (name, vals) = csv.delete_column(1).unwrap();
+        csv.insert_column(1, name, vals).unwrap();
+        assert_eq!(csv.column_count(), 3);
+        assert_eq!(csv.headers, vec!["a", "b", "c"]);
+        let rows = csv.read_range(0, 2).unwrap();
+        assert_eq!(rows[0], vec!["1", "x", "foo"]);
+        assert_eq!(rows[1], vec!["2", "y", "bar"]);
+    }
+
+    #[test]
+    fn delete_column_refuses_when_only_one_left() {
+        let f = write_csv_named("a\n1\n2\n", "csv");
+        let mut csv = CsvFile::open(f.path()).unwrap();
+        assert!(csv.delete_column(0).is_err());
     }
 
     #[test]
