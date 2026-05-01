@@ -12,8 +12,26 @@ pub mod menu;
 pub mod state;
 
 use state::AiAppState;
+use std::sync::OnceLock;
+use parking_lot::Mutex;
 use tauri::{Emitter, Manager};
 use tauri_plugin_cli::CliExt;
+
+/// Paths queued at cold start (CLI arg, `CSVIEW_AUTOLOAD`, or macOS Open With…
+/// events that arrive *before* `setup()` has run). On macOS, `RunEvent::Opened`
+/// can fire during `applicationWillFinishLaunching`, before Tauri's setup hook
+/// runs and `app.manage(state)` is called — accessing `app.state::<T>()` at
+/// that point would panic across the Objective-C boundary. Module-level
+/// globals sidestep that lifetime issue.
+static PENDING_OPEN_PATHS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+static FRONTEND_READY: OnceLock<Mutex<bool>> = OnceLock::new();
+
+fn pending_paths() -> &'static Mutex<Vec<String>> {
+    PENDING_OPEN_PATHS.get_or_init(|| Mutex::new(Vec::new()))
+}
+fn frontend_ready() -> &'static Mutex<bool> {
+    FRONTEND_READY.get_or_init(|| Mutex::new(false))
+}
 
 /// Entry point — called from `main.rs`.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -120,9 +138,9 @@ pub fn run() {
             // falls back to env vars. See `commands_ai::auto_detect_keys`.
             crate::commands_ai::auto_detect_keys(&state);
 
-            app.manage(state);
-
-            // Handle CLI --file argument.
+            // Handle CLI --file argument and CSVIEW_AUTOLOAD. Buffer into
+            // pending_open_paths so the frontend picks it up via
+            // `cli_initial_file` once it's mounted.
             let mut initial_path: Option<String> = None;
             if let Ok(matches) = app.cli().matches() {
                 if let Some(arg) = matches.args.get("file") {
@@ -139,12 +157,10 @@ pub fn run() {
                 }
             }
             if let Some(path) = initial_path {
-                let main = app.get_webview_window("main").unwrap();
-                tauri::async_runtime::spawn(async move {
-                    std::thread::sleep(std::time::Duration::from_millis(800));
-                    let _ = main.emit("cli-open-file", path);
-                });
+                pending_paths().lock().push(path);
             }
+
+            app.manage(state);
 
             Ok(())
         })
@@ -152,20 +168,28 @@ pub fn run() {
         .expect("error while building csviewai")
         .run(|app_handle, event| {
             // macOS file-open events (Finder, Dock drop, Open With…).
+            // NOTE: this can fire *before* `setup()` runs, so we must not
+            // touch `app.state::<AiAppState>()` here — it would panic across
+            // the Objective-C boundary. Use module-level globals instead.
             if let tauri::RunEvent::Opened { urls } = event {
+                let ready = *frontend_ready().lock();
                 for url in urls {
                     if let Ok(path) = url.to_file_path() {
-                        let target = app_handle
-                            .webview_windows()
-                            .into_iter()
-                            .find(|(_, w)| w.is_focused().unwrap_or(false))
-                            .map(|(_, w)| w)
-                            .or_else(|| app_handle.get_webview_window("main"));
-                        if let Some(window) = target {
-                            let _ = window.emit(
-                                "cli-open-file",
-                                path.to_string_lossy().to_string(),
-                            );
+                        let path_str = path.to_string_lossy().to_string();
+                        if ready {
+                            let target = app_handle
+                                .webview_windows()
+                                .into_iter()
+                                .find(|(_, w)| w.is_focused().unwrap_or(false))
+                                .map(|(_, w)| w)
+                                .or_else(|| app_handle.get_webview_window("main"));
+                            if let Some(window) = target {
+                                let _ = window.emit("cli-open-file", path_str);
+                            }
+                        } else {
+                            // Frontend hasn't mounted yet — buffer until it
+                            // calls `cli_initial_file` to drain.
+                            pending_paths().lock().push(path_str);
                         }
                     }
                 }
@@ -173,7 +197,11 @@ pub fn run() {
         });
 }
 
+/// Drain any paths queued during cold start (CLI arg, env autoload, or macOS
+/// `Opened` events fired before the frontend mounted) and mark the frontend
+/// as ready so subsequent opens flow through the live `cli-open-file` event.
 #[tauri::command]
-fn cli_initial_file() -> Option<String> {
-    None
+fn cli_initial_file() -> Vec<String> {
+    *frontend_ready().lock() = true;
+    pending_paths().lock().drain(..).collect()
 }

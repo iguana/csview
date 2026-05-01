@@ -11,6 +11,7 @@ import {
   writeText as writeClipboardText,
 } from "@tauri-apps/plugin-clipboard-manager";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 // Shared from base csview
@@ -194,6 +195,18 @@ export function App() {
     const offFile = listen<string>("cli-open-file", async (event) => {
       if (event.payload) await openFile(event.payload);
     });
+    // Drain any paths queued before the listener was attached (cold-start
+    // race when launched via Finder double-click or `open file.csv`).
+    void (async () => {
+      try {
+        const pending = await invoke<string[]>("cli_initial_file");
+        for (const p of pending) {
+          if (p) await openFile(p);
+        }
+      } catch {
+        // ignore — command may not exist in older builds
+      }
+    })();
     const offTheme = listen<string>("csview-theme", (event) => {
       const v = event.payload;
       if (v === "light" || v === "dark" || v === "system") {
