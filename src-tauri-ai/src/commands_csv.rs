@@ -129,11 +129,23 @@ fn detect_headers(path: &Path, delimiter: u8) -> Result<(Vec<String>, bool), Com
     let first_row: Vec<String> = first.iter().map(str::to_string).collect();
     let has_header = looks_like_header(&first_row, second.as_ref());
 
+    // Probe the next ~32 rows so a wider data row doesn't get its tail truncated
+    // by a narrower header (the CSV reader is `flexible(true)` upstream).
+    let mut max_cols = first_row.len().max(second.as_ref().map(|r| r.len()).unwrap_or(0));
+    for r in iter.take(32).flatten() {
+        if r.len() > max_cols {
+            max_cols = r.len();
+        }
+    }
+
     if has_header {
-        Ok((first_row, true))
+        let mut headers = first_row;
+        for i in headers.len()..max_cols {
+            headers.push(format!("col_{}", i + 1));
+        }
+        Ok((headers, true))
     } else {
-        let n = first_row.len();
-        let headers: Vec<String> = (1..=n).map(|i| format!("col_{i}")).collect();
+        let headers: Vec<String> = (1..=max_cols).map(|i| format!("col_{i}")).collect();
         Ok((headers, false))
     }
 }

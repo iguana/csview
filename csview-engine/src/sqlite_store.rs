@@ -305,6 +305,7 @@ impl SqliteStore {
         let mut rdr = csv::ReaderBuilder::new()
             .delimiter(delimiter)
             .has_headers(has_header)
+            .flexible(true)
             .from_path(path)?;
 
         conn.execute_batch("BEGIN")?;
