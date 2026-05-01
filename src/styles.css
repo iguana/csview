@@ -587,6 +587,21 @@ input[type="search"]::-webkit-search-cancel-button {
   border-right: 1px solid var(--border);
   user-select: none;
   font-variant-numeric: tabular-nums;
+  position: relative;
+}
+.row-index-cell .row-resize-handle {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -3px;
+  height: 6px;
+  cursor: row-resize;
+  user-select: none;
+  z-index: 3;
+}
+.row-index-cell .row-resize-handle:hover,
+.row-index-cell .row-resize-handle.dragging {
+  background: var(--accent);
 }
 .grid-row {
   display: flex;

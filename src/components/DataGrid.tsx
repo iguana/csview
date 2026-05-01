@@ -90,6 +90,8 @@ const ROW_INDEX_WIDTH = 60;
 const HEADER_HEIGHT = 34;
 const MIN_COL_WIDTH = 60;
 const MAX_AUTOSIZE_WIDTH = 800;
+const MIN_ROW_HEIGHT = 18;
+const MAX_ROW_HEIGHT = 600;
 /** Per-side cell horizontal padding (matches `.grid-cell { padding: 0 10px }` in CSS). */
 const CELL_HPADDING = 10;
 /** Header content overhead: kind badge + sort badge + flex gaps + padding. */
@@ -145,7 +147,9 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     const measureCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
     const [columnWidths, setColumnWidths] = useState<Record<number, number>>({});
+    const [rowHeights, setRowHeights] = useState<Record<number, number>>({});
     const [resizing, setResizing] = useState<number | null>(null);
+    const [resizingRow, setResizingRow] = useState<number | null>(null);
     const [, forceTick] = useState(0);
     const [editingCell, setEditingCell] = useState<CellCoord | null>(null);
     const [editValue, setEditValue] = useState("");
@@ -176,6 +180,18 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
         return next.size === prev.size ? prev : next;
       });
       setFrozenRowsState((n) => Math.min(n, rowCount));
+      setRowHeights((prev) => {
+        const keys = Object.keys(prev);
+        if (keys.length === 0) return prev;
+        const next: Record<number, number> = {};
+        let changed = false;
+        for (const k of keys) {
+          const idx = Number(k);
+          if (idx < rowCount) next[idx] = prev[idx];
+          else changed = true;
+        }
+        return changed ? next : prev;
+      });
     }, [rowCount]);
 
     // Bubble display-state up so the host can render menu enablement / chips.
@@ -191,6 +207,11 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     const widthFor = useCallback(
       (index: number) => columnWidths[index] ?? DEFAULT_COL_WIDTH,
       [columnWidths],
+    );
+
+    const heightFor = useCallback(
+      (dataRowIdx: number) => rowHeights[dataRowIdx] ?? rowHeight,
+      [rowHeights, rowHeight],
     );
 
     // --- Visible columns / rows mapping ---
@@ -249,13 +270,13 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
     const rowVirtualizer = useVirtualizer({
       count: displayRowCount,
       getScrollElement: () => scrollRef.current,
-      estimateSize: () => rowHeight,
+      estimateSize: (i) => heightFor(dataRowFor(i)),
       overscan: 12,
     });
 
     useEffect(() => {
       rowVirtualizer.measure();
-    }, [rowHeight, displayRowCount, rowVirtualizer]);
+    }, [rowHeight, rowHeights, displayRowCount, rowVirtualizer]);
 
     useEffect(() => {
       if (jumpToRow != null) {
@@ -354,6 +375,42 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       },
       [widthFor],
     );
+
+    // --- Row resizing (vertical) ---
+    const startRowResize = useCallback(
+      (e: React.MouseEvent, dataRowIdx: number) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setResizingRow(dataRowIdx);
+        const startY = e.clientY;
+        const startHeight = heightFor(dataRowIdx);
+        const onMove = (ev: MouseEvent) => {
+          const delta = ev.clientY - startY;
+          const next = Math.max(
+            MIN_ROW_HEIGHT,
+            Math.min(MAX_ROW_HEIGHT, startHeight + delta),
+          );
+          setRowHeights((prev) => ({ ...prev, [dataRowIdx]: next }));
+        };
+        const onUp = () => {
+          setResizingRow(null);
+          window.removeEventListener("mousemove", onMove);
+          window.removeEventListener("mouseup", onUp);
+        };
+        window.addEventListener("mousemove", onMove);
+        window.addEventListener("mouseup", onUp);
+      },
+      [heightFor],
+    );
+
+    const resetRowHeight = useCallback((dataRowIdx: number) => {
+      setRowHeights((prev) => {
+        if (!(dataRowIdx in prev)) return prev;
+        const next = { ...prev };
+        delete next[dataRowIdx];
+        return next;
+      });
+    }, []);
 
     // --- Auto-size column ---
     const getMeasureContext = useCallback(() => {
@@ -825,9 +882,10 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       const isHit = searchHitRows.has(dataRow);
       const isSelectedRow = activeCell != null && activeCell.row === dataRow;
       const isFrozenRow = displayIdx < effectiveFrozenRows;
+      const thisRowHeight = heightFor(dataRow);
       const baseStyle: React.CSSProperties = opts.absolute
         ? {
-            height: rowHeight,
+            height: thisRowHeight,
             transform: `translateY(${opts.topPx}px)`,
             width: totalWidth,
             position: "absolute",
@@ -835,7 +893,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
             left: 0,
           }
         : {
-            height: rowHeight,
+            height: thisRowHeight,
             width: totalWidth,
             position: "relative",
           };
@@ -852,16 +910,26 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
           <div
             className={`row-index-cell ${effectiveFrozenColumns > 0 || effectiveFrozenRows > 0 ? "sticky-left" : ""} ${isFrozenRow ? "frozen" : ""}`}
             style={{
-              height: rowHeight,
+              height: thisRowHeight,
               ...(effectiveFrozenColumns > 0 || effectiveFrozenRows > 0
                 ? { position: "sticky", left: 0, zIndex: isFrozenRow ? 4 : 2 }
                 : null),
             }}
             onContextMenu={(e) => onRowIndexContextMenu(e, displayIdx)}
             data-testid={`row-index-${displayIdx}`}
-            title="Right-click for row options"
+            title="Right-click for row options · drag bottom edge to resize"
           >
             {dataRow + 1}
+            <div
+              className={`row-resize-handle ${resizingRow === dataRow ? "dragging" : ""}`}
+              onMouseDown={(e) => startRowResize(e, dataRow)}
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                resetRowHeight(dataRow);
+              }}
+              title="Drag to resize row, double-click to reset"
+              data-testid={`row-resize-${dataRow}`}
+            />
           </div>
           {visibleColumns.map((col, visibleColIdx) => {
             const value = row ? (row[col.index] ?? "") : "";
@@ -891,7 +959,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
                 role="cell"
                 style={{
                   width: widthFor(col.index),
-                  height: rowHeight,
+                  height: thisRowHeight,
                   ...stickyStyle,
                 }}
                 title={value}
@@ -922,7 +990,16 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
       );
     }
 
-    const frozenRowsHeight = effectiveFrozenRows * rowHeight;
+    const frozenRowTops = useMemo(() => {
+      const tops: number[] = [];
+      let acc = 0;
+      for (let i = 0; i < effectiveFrozenRows; i++) {
+        tops.push(acc);
+        acc += heightFor(dataRowFor(i));
+      }
+      return { tops, total: acc };
+    }, [effectiveFrozenRows, dataRowFor, heightFor]);
+    const frozenRowsHeight = frozenRowTops.total;
     const totalHeight =
       rowVirtualizer.getTotalSize() + HEADER_HEIGHT + frozenRowsHeight;
 
@@ -1046,7 +1123,7 @@ export const DataGrid = forwardRef<DataGridHandle, DataGridProps>(
               {Array.from({ length: effectiveFrozenRows }).map((_, i) =>
                 renderRow(i, {
                   absolute: true,
-                  topPx: i * rowHeight,
+                  topPx: frozenRowTops.tops[i],
                   key: `frozen-${i}`,
                 }),
               )}
